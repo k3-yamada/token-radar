@@ -1,0 +1,20 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { parseSnapshot } from '../lib/infra/snapshot.ts';
+import { calibrateBacktest, globalSizeAdjustment } from '../lib/domain/backtest.ts';
+
+const snapshot = parseSnapshot(readFileSync(resolve(process.argv[2] ?? 'input/snapshot.json'), 'utf8'));
+const baselineAdjustment = globalSizeAdjustment(snapshot);
+const variants = [
+  ...[[0, 1], [.005, .995], [.01, .99], [.025, .975], [.05, .95]].map(([low, high]) => ({ name: `winsor ${low * 100}/${high * 100}`, adjustment: baselineAdjustment, calibrationOptions: { winsor: [low, high] } })),
+  ...[[1, 12], [2, 24], [4, 48]].map(([min, max]) => ({ name: `shrink clamp ${min}-${max}`, adjustment: baselineAdjustment, shrinkage: { base: 6, min, max } })),
+  { name: 'global exclusions: none', adjustment: baselineAdjustment, calibrationOptions: { exclusions: [], winsor: [.01, .99] } },
+  { name: 'size fit: all live peers', adjustment: globalSizeAdjustment(snapshot, true) }
+];
+const metric = (result) => ({ coverage: result.summary.all.coverage, median_log_error: result.summary.all.median_log_error, median_absolute_log_error: result.summary.all.median_absolute_log_error });
+const rows = variants.map(v => {
+  const result = calibrateBacktest(snapshot, undefined, { ...v.adjustment, mode: 'global' }, { shrinkage: v.shrinkage, calibrationOptions: v.calibrationOptions });
+  return { variant: v.name, ...metric(result) };
+});
+const base = calibrateBacktest(snapshot, undefined, { ...baselineAdjustment, mode: 'global' });
+console.log(JSON.stringify({ baseline: metric(base), variants: rows }, null, 2));
