@@ -1,6 +1,6 @@
 import { calibrate, type CalibrationOptions } from './calibration.ts';
-import { ageDays, BASELINE_SHAPES, changePercentiles, estimate, growthFactor, maturityFactor, type CentreEstimator, type FactorShapes } from './estimate.ts';
-import { isRankable } from './eligibility.ts';
+import { ageDays, BASELINE_SHAPES, blendedCalibrationCentre, changePercentiles, estimate, growthFactor, maturityFactor, type CentreEstimator, type FactorShapes } from './estimate.ts';
+import { selectScoredRows } from './eligibility.ts';
 import { median, quantile } from './statistics.ts';
 import { MODEL, type CalibrationSet, type Snapshot, type SnapshotProtocol } from './types.ts';
 
@@ -13,6 +13,7 @@ export interface BacktestObservation {
   highLogDistance: number;
   bandRatio: number;
   peerCount: number;
+  blendWeight: number;
   predictedValue: number;
   realizedValue: number;
 }
@@ -134,29 +135,17 @@ export function estimatorContestReport(snapshot: Snapshot) {
 const DERIVATIVE = new Set(MODEL.global_excluded_categories);
 const isLive = (p: SnapshotProtocol) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0;
 
-/** Matches the watchlist and early-row selection used by buildBoard. */
-function boardScoredRows(snapshot: Snapshot): SnapshotProtocol[] {
-  const index = new Map(snapshot.protocols.map(p => [p.slug, p]));
-  const selected = new Map<string, SnapshotProtocol>();
-  for (const slug of snapshot.watchlist) {
-    const protocol = index.get(slug);
-    if (protocol) selected.set(slug, protocol);
-  }
-  const slots = Math.max(0, Math.min(MODEL.early_rows, MODEL.board_max_rows - selected.size));
-  const early = snapshot.protocols
-    .filter(p => !selected.has(p.slug) && isRankable(p))
-    .sort((a, b) => b.tvl_usd - a.tvl_usd || a.slug.localeCompare(b.slug))
-    .slice(0, slots);
-  for (const protocol of early) selected.set(protocol.slug, protocol);
-  return [...selected.values()];
-}
-
-function factorNormalizers(snapshot: Snapshot, shapes: FactorShapes, model: typeof MODEL, unknownAge = model.unknown_listed_age_days): { growth: number; maturity: number } {
+/**
+ * Medians of the powered growth and maturity factors over the rows the board would score from `snapshot`,
+ * i.e. what production divides out. `medianChange` must be that same snapshot's median 7d change (the value
+ * `calibrate(snapshot).medianChange` hands to `estimate`), so G1/G3 see the centre they are scored with; G2 ignores it.
+ */
+export function factorNormalizers(snapshot: Snapshot, shapes: FactorShapes, model: typeof MODEL, medianChange: number, unknownAge = model.unknown_listed_age_days, amplitudes = { growth: 1, maturity: 1 }): { growth: number; maturity: number } {
   const percentiles = changePercentiles(snapshot.protocols);
-  const scored = boardScoredRows(snapshot);
+  const scored = selectScoredRows(snapshot, model);
   return {
-    growth: median(scored.map(p => growthFactor(shapes.growth, p.change_7d, 0, model, percentiles.get(p.slug) ?? .5))) || 1,
-    maturity: median(scored.map(p => maturityFactor(shapes.maturity, ageDays(snapshot.as_of, p.listed_at), model, unknownAge))) || 1
+    growth: median(scored.map(p => Math.exp(amplitudes.growth * Math.log(growthFactor(shapes.growth, p.change_7d, medianChange, model, percentiles.get(p.slug) ?? .5))))) || 1,
+    maturity: median(scored.map(p => Math.exp(amplitudes.maturity * Math.log(maturityFactor(shapes.maturity, ageDays(snapshot.as_of, p.listed_at), model, unknownAge))))) || 1
   };
 }
 
@@ -165,16 +154,20 @@ export function derivedUnknownAge(snapshot: Snapshot): number {
   return median(ages) || 0;
 }
 
-function fitFactorAmplitudes(snapshot: Snapshot, adjustment?: SizeAdjustment, unknownAge = derivedUnknownAge(snapshot)) {
+export function fitFactorAmplitudes(snapshot: Snapshot, adjustment?: SizeAdjustment, unknownAge = derivedUnknownAge(snapshot)) {
   const live = snapshot.protocols.filter(isLive);
-  const cal = calibrate(snapshot, adjustment ? { ...adjustment, center: adjustmentCenter(live.filter(p => !DERIVATIVE.has(p.category ?? ''))) } : undefined);
+  // The size-adjustment centre is always the median log TVL of the peers being fitted, so a caller passing only { mode, slope } cannot produce NaN residuals.
+  const center = adjustmentCenter(live.filter(p => !DERIVATIVE.has(p.category ?? '')));
+  const cal = calibrate(snapshot, adjustment ? { ...adjustment, center } : undefined);
   const percentiles = changePercentiles(snapshot.protocols);
   const residuals: number[] = [], gx: number[] = [], mx: number[] = [];
   for (const p of live) {
     const set = p.category ? cal.categories.get(p.category) : undefined;
-    const centre = set?.count ? (set.count === 1 ? (set.median + cal.global.median) / 2 : set.median) : cal.global.median;
+    // The centre estimate() predicts from: the dispersion-aware shrinkage blend of category and global centres
+    // (global alone without live category peers), not the unshrunk category median.
+    const centre = blendedCalibrationCentre(set ?? { count: 0, q25: 0, median: 0, q75: 0 }, cal.global, p.category ? cal.samples.get(p.category) : undefined, cal.samples.get('global'));
     const raw = Math.log(p.mcap_usd! / p.tvl_usd);
-    const size = adjustment ? adjustment.slope * (Math.log(p.tvl_usd) - (adjustment as SizeAdjustment & {center?:number}).center!) : 0;
+    const size = adjustment ? adjustment.slope * (Math.log(p.tvl_usd) - center) : 0;
     residuals.push(raw - size - centre);
     gx.push(Math.log(growthFactor('G2', p.change_7d, 0, MODEL, percentiles.get(p.slug) ?? .5)));
     mx.push(Math.log(maturityFactor('M1', ageDays(snapshot.as_of, p.listed_at), MODEL, unknownAge)));
@@ -182,6 +175,15 @@ function fitFactorAmplitudes(snapshot: Snapshot, adjustment?: SizeAdjustment, un
   const gc = median(gx), mc = median(mx), x = gx.map(v => v-gc), y = mx.map(v => v-mc);
   const fit = (z: number[]) => { const den=z.reduce((s,v)=>s+v*v,0); return den ? z.reduce((s,v,i)=>s+v*residuals[i]!,0)/den : 1; };
   return { growth: fit(x), maturity: fit(y), unknownAge };
+}
+
+/**
+ * The amplitudes an evaluation arm applies to `sample`: the one procedure shared by every LOO fold in `backtest`
+ * (sample = the snapshot minus the held-out peer) and by `factorChangeReport().amplitudes` (sample = the full snapshot).
+ */
+export function evaluatedAmplitudes(sample: Snapshot, sizeAdjustment: SizeAdjustment | undefined, arm: { fitAmplitudes?: boolean; derivedUnknownAge?: boolean }) {
+  const unknownAge = arm.derivedUnknownAge ? derivedUnknownAge(sample) : MODEL.unknown_listed_age_days;
+  return arm.fitAmplitudes ? fitFactorAmplitudes(sample, sizeAdjustment, unknownAge) : { growth: 1, maturity: 1, unknownAge };
 }
 
 function adjustmentCenter(rows: SnapshotProtocol[]): number {
@@ -217,15 +219,14 @@ export function backtest(snapshot: Snapshot, options: {
 } = {}): BacktestObservation[] {
   const shapes = options.factorShapes ?? BASELINE_SHAPES;
   const model = options.model ?? MODEL;
-  const factors = factorNormalizers(snapshot, shapes, model, options.derivedUnknownAge ? derivedUnknownAge(snapshot) : model.unknown_listed_age_days);
   const percentiles = changePercentiles(snapshot.protocols);
   const observations: BacktestObservation[] = [];
 
   for (const peer of snapshot.protocols.filter(isLive)) {
     const reducedOriginal = { ...snapshot, protocols: snapshot.protocols.filter(p => p.slug !== peer.slug) };
     const reduced = reducedOriginal;
-    const unknownAge = options.derivedUnknownAge ? derivedUnknownAge(reduced) : MODEL.unknown_listed_age_days;
-    const amplitudes = options.fitAmplitudes ? fitFactorAmplitudes(reduced, options.sizeAdjustment, unknownAge) : { growth: 1, maturity: 1, unknownAge };
+    const amplitudes = evaluatedAmplitudes(reduced, options.sizeAdjustment, options);
+    const unknownAge = amplitudes.unknownAge;
     const params = adjustmentParameters(peer, reduced.protocols, options.sizeAdjustment);
     const calibration = calibrate(reduced, params, options.centreEstimator, options.calibrationOptions);
     const categorySet = peer.category ? calibration.categories.get(peer.category) : undefined;
@@ -271,15 +272,23 @@ export function backtest(snapshot: Snapshot, options: {
       shrinkage: options.shrinkage
       , amplitudes, unknownAge
     });
-    const rawFactor = Math.exp(amplitudes.growth * Math.log(growthFactor(shapes.growth, peer.change_7d, 0, model, percentiles.get(peer.slug) ?? .5)) + amplitudes.maturity * Math.log(maturityFactor(shapes.maturity, ageDays(snapshot.as_of, peer.listed_at), model, unknownAge)));
-    const normalization = (Math.log(factors.growth * factors.maturity) * (options.factorWeight ?? 1)) + Math.log(rawFactor) - Math.log(growthFactor(shapes.growth, peer.change_7d, 0, model, percentiles.get(peer.slug) ?? .5) * maturityFactor(shapes.maturity, ageDays(snapshot.as_of, peer.listed_at), model, unknownAge));
+    const factors = factorNormalizers(reduced, shapes, model, calibration.medianChange, unknownAge, amplitudes);
+    // Production divides the scored rows' factor medians out of every row: the unweighted normalization term.
+    // factorWeight (research arms only) then scales the row's own factor log-deviations from those medians, so the
+    // weighted log value carries w*(ln g - ln gMedian) + w*(ln m - ln mMedian) in place of the unweighted deviations.
+    // The correction varies by row, so a median bias correction cannot cancel it; at the default weight 1 nothing is
+    // added and the observations are bit-identical.
+    const factorWeight = options.factorWeight ?? 1;
+    const factorDeviation = (Math.log(prediction.growthMult) - Math.log(factors.growth)) + (Math.log(prediction.maturityMult) - Math.log(factors.maturity));
+    const unweighted = -Math.log(factors.growth) - Math.log(factors.maturity);
+    const normalization = factorWeight === 1 ? unweighted : unweighted + (factorWeight - 1) * factorDeviation;
     const logError = Math.log(prediction.implied / peer.mcap_usd!) + normalization;
     const width = options.bandMultipliers?.[prediction.basis === 'category' ? 'category' : 'global_anchored'] ?? options.bandMultiplier ?? 1;
     const lowLogDistance = prediction.centre - prediction.q25;
     const highLogDistance = prediction.q75 - prediction.centre;
     const covered = logError >= -width * lowLogDistance && logError <= width * highLogDistance;
     const bandRatio = prediction.high / Math.max(1, prediction.low);
-    observations.push({ slug: peer.slug, basis: prediction.basis, covered, logError, lowLogDistance, highLogDistance, bandRatio, peerCount: prediction.ratioCount, predictedValue: prediction.implied * Math.exp(normalization), realizedValue: peer.mcap_usd! });
+    observations.push({ slug: peer.slug, basis: prediction.basis, covered, logError, lowLogDistance, highLogDistance, bandRatio, peerCount: prediction.ratioCount, blendWeight: prediction.blendWeight, predictedValue: prediction.implied * Math.exp(normalization), realizedValue: peer.mcap_usd! });
   }
   return observations;
 }
@@ -341,7 +350,7 @@ export function selectionDiagnostics(rows: BacktestObservation[]) {
   };
 }
 
-function bestBandMultiplier(rows: BacktestObservation[]): number {
+export function bestBandMultiplier(rows: BacktestObservation[]): number {
   let best = .5;
   let closest = Infinity;
   for (let step = 50; step <= 300; step++) {
@@ -356,7 +365,7 @@ function bestBandMultiplier(rows: BacktestObservation[]): number {
   return best;
 }
 
-export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes = BASELINE_SHAPES, sizeAdjustment?: SizeAdjustment, variants: { peerWeighting?: 'uniform' | 'kernel'; singlePeerBlend?: boolean; centreEstimator?: CentreEstimator; model?: typeof MODEL; shrinkage?: { base: number; min: number; max: number }; factorWeight?: number; fitAmplitudes?: boolean; derivedUnknownAge?: boolean; calibrationOptions?: CalibrationOptions } = {}) {
+export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes = BASELINE_SHAPES, sizeAdjustment?: SizeAdjustment, variants: { peerWeighting?: 'uniform' | 'kernel'; singlePeerBlend?: boolean; centreEstimator?: CentreEstimator; model?: typeof MODEL; shrinkage?: { base: number; min: number; max: number }; factorWeight?: number; fitAmplitudes?: boolean; derivedUnknownAge?: boolean; calibrationOptions?: CalibrationOptions; bandContinuity?: 'current' | 'threshold' | 'interpolate' } = {}) {
   const arm = (extra: { biasFactor?: number; bandMultipliers?: BandMultipliers } = {}) => backtest(snapshot, { factorShapes, sizeAdjustment, ...variants, ...extra });
   const uncorrected = arm();
   const correctionFactor = Math.exp(-median(uncorrected.map(row => row.logError)));
@@ -369,8 +378,18 @@ export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes
     category: bestBandMultiplier(corrected.filter(row => row.basis === 'category').map(row => ({ ...row, lowLogDistance: residualQuantiles.category.r75, highLogDistance: -residualQuantiles.category.r25 }))),
     global_anchored: bestBandMultiplier(corrected.filter(row => row.basis !== 'category').map(row => ({ ...row, lowLogDistance: residualQuantiles.global_anchored.r75, highLogDistance: -residualQuantiles.global_anchored.r25 })))
   };
-  const final = corrected.map(row => { const q = row.basis === 'category' ? residualQuantiles.category : residualQuantiles.global_anchored; const m = widthMultipliers[row.basis === 'category' ? 'category' : 'global_anchored']; const lowLogDistance = q.r75; const highLogDistance = -q.r25; const covered = row.logError >= -m * lowLogDistance && row.logError <= m * highLogDistance; return { ...row, lowLogDistance, highLogDistance, covered, bandRatio: Math.exp(m * (q.r75 - q.r25)) }; });
-  return { correctionFactor, widthMultipliers, residualQuantiles, widthMultiplier: widthMultipliers.category, observations: final, summary: summarizeBacktest(final) };
+  const final = corrected.map(row => {
+    let categoryBasis = row.basis === 'category';
+    if (variants.bandContinuity === 'threshold' && row.blendWeight < .5) categoryBasis = false;
+    const blend = variants.bandContinuity === 'interpolate' ? row.blendWeight : Number(categoryBasis);
+    const r25 = residualQuantiles.global_anchored.r25 * (1 - blend) + residualQuantiles.category.r25 * blend;
+    const r75 = residualQuantiles.global_anchored.r75 * (1 - blend) + residualQuantiles.category.r75 * blend;
+    const m = categoryBasis ? widthMultipliers.category : widthMultipliers.global_anchored;
+    const lowLogDistance = r75; const highLogDistance = -r25;
+    const covered = row.logError >= -m * lowLogDistance && row.logError <= m * highLogDistance;
+    return { ...row, lowLogDistance, highLogDistance, covered, bandRatio: Math.exp(m * (r75 - r25)) };
+  });
+  return { correctionFactor, widthMultipliers, residualQuantiles, observations: final, summary: summarizeBacktest(final) };
 }
 
 export function factorChangeReport(snapshot: Snapshot, sizeAdjustment?: SizeAdjustment) {
@@ -382,7 +401,13 @@ export function factorChangeReport(snapshot: Snapshot, sizeAdjustment?: SizeAdju
   const afterFit = chooseFit ? fitted : base;
   const unknown = arm(chooseFit, true);
   const chooseUnknown = unknown.summary.all.median_absolute_log_error <= afterFit.summary.all.median_absolute_log_error * 1.01;
-  return { baseline: metrics(base.observations), fitted: metrics(fitted.observations), unknown_age: metrics(unknown.observations), adopted_amplitudes: chooseFit, adopted_unknown_age: chooseUnknown, selected: chooseUnknown ? unknown : afterFit, amplitudes: fitFactorAmplitudes(snapshot, sizeAdjustment) , unknownAge: derivedUnknownAge(snapshot) };
+  // The decision above is scored on amplitudes refit inside every LOO fold, so no single evaluated pair exists.
+  // `amplitudes` is therefore the full-sample fit through that same procedure (`evaluatedAmplitudes`), under the
+  // unknown-age setting of the fitted arm the adoption rests on: the `fitted` arm (fixed unknown age) unless the
+  // fit was adopted and the derived unknown age was then adopted on top of it (the `unknown` arm). It was
+  // previously always fitted at the full-sample derived unknown age, a setting no evaluated arm necessarily used.
+  const amplitudes = evaluatedAmplitudes(snapshot, sizeAdjustment, { fitAmplitudes: true, derivedUnknownAge: chooseFit && chooseUnknown });
+  return { baseline: metrics(base.observations), fitted: metrics(fitted.observations), unknown_age: metrics(unknown.observations), adopted_amplitudes: chooseFit, adopted_unknown_age: chooseUnknown, selected: chooseUnknown ? unknown : afterFit, amplitudes, unknownAge: derivedUnknownAge(snapshot) };
 }
 
 export const GRADE_BAND_EDGES = [3, 10, 30, 100] as const;
@@ -454,7 +479,8 @@ function contestArm(snapshot: Snapshot, adjustment?: SizeAdjustment, variants: {
 }
 
 export function measurementReport(snapshot: Snapshot) {
-  const categorySlope = withinCategorySlope(snapshot) - 1;
+  // withinCategorySlope already returns the log-ratio slope (log-mcap slope minus 1); do not subtract again.
+  const categorySlope = withinCategorySlope(snapshot);
   const globalAdjustment = globalSizeAdjustment(snapshot);
   const baseline = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope });
   const weighted = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, { peerWeighting: 'kernel' });

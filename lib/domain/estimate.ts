@@ -18,6 +18,15 @@ export function effectiveShrinkageK(set: CalibrationSet, global: CalibrationSet,
   return Math.max(min, Math.min(max, base * interquartileRange(categorySamples) / denominator));
 }
 
+/** Blend category and global calibration centres with the production shrinkage rule. */
+export function blendedCalibrationCentre(set: CalibrationSet, global: CalibrationSet, categorySamples?: number[], globalSamples?: number[], shrinkage = { base: 6, min: 2, max: 24 }): number {
+  const count = set.count;
+  if (!count) return global.centre ?? global.median;
+  const k = effectiveShrinkageK(set, global, categorySamples, globalSamples, shrinkage.base, shrinkage.min, shrinkage.max);
+  const weight = count / (count + k);
+  return weight * (set.centre ?? set.median) + (1 - weight) * (global.centre ?? global.median);
+}
+
 export type FactorShapes = { growth: 'G1' | 'G2' | 'G3'; maturity: 'M1' | 'M2' };
 export const BASELINE_SHAPES: FactorShapes = { growth: 'G2', maturity: 'M1' };
 export function adjustLogRatio(logRatio: number, logTvl: number, medianLogTvl: number, ratioSlope: number, quad = 0): number {
@@ -87,7 +96,9 @@ export function estimate(p: SnapshotProtocol, asOf: string, set: CalibrationSet,
     ? (value + globalValue) / 2
     : count ? w * value + (1 - w) * globalValue : globalValue;
   const calibrationQ25 = blend(set.q25, global.q25);
-  const calibrationCentre = blend(set.centre ?? set.median, global.centre ?? global.median);
+  const calibrationCentre = options.singlePeerBlend && count === 1
+    ? ((set.centre ?? set.median) + (global.centre ?? global.median)) / 2
+    : blendedCalibrationCentre(set, global, options.categorySamples, options.globalSamples, shrinkage);
   const calibrationQ75 = blend(set.q75, global.q75);
   const adjust = (value: number) => options.sizeAdjustment
     ? adjustLogRatio(value, Math.log(p.tvl_usd), options.sizeAdjustment.center, options.sizeAdjustment.slope, options.sizeAdjustment.quad)
@@ -112,6 +123,7 @@ export function estimate(p: SnapshotProtocol, asOf: string, set: CalibrationSet,
     chainMult: 'none' as const,
     factor,
     ratioCount: count,
+    blendWeight: w,
     basis,
     centre,
     q25: lowLog,

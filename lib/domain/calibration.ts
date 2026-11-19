@@ -4,7 +4,7 @@ import { adjustLogRatio, estimateCentre, type CentreEstimator } from './estimate
 
 const DERIVATIVE = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 
-export interface CalibrationOptions { exclusions?: string[]; winsor?: [number, number] }
+export interface CalibrationOptions { exclusions?: string[]; winsor?: [number, number]; adjustGlobal?: boolean }
 export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; center: number; quad?: number }, centreEstimator: CentreEstimator = 'median', options: CalibrationOptions = {}): Calibration {
   const excluded = new Set(options.exclusions ?? [...DERIVATIVE]);
   const live = snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
@@ -18,7 +18,9 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
   });
   const globalRows = live.filter(p => !excluded.has(p.category ?? ''));
   const globalTotal = snapshot.protocols.filter(p => !excluded.has(p.category ?? '')).length;
-  const globalLogs = globalRows.map(p => Math.log(p.mcap_usd! / p.tvl_usd));
+  const globalLogs = globalRows.map(p => options.adjustGlobal
+    ? adjustLogRatio(Math.log(p.mcap_usd! / p.tvl_usd), Math.log(p.tvl_usd), sizeAdjustment?.center ?? 0, sizeAdjustment ? -sizeAdjustment.slope : 0, sizeAdjustment ? -(sizeAdjustment.quad ?? 0) : 0)
+    : Math.log(p.mcap_usd! / p.tvl_usd));
   const [lowP, highP] = options.winsor ?? [.01, .99];
   const lower = lowP === 0 ? -Infinity : quantile(globalLogs, lowP);
   const upper = highP === 1 ? Infinity : quantile(globalLogs, highP);

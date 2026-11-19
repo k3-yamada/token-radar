@@ -61,13 +61,28 @@
     return 'Grade ' + g + ': ' + rule + ' In leave-one-out backtesting, this grade carried ' + metric.count + ' estimates, ' + coverage + ' band coverage, and ' + error + ' median absolute log error.';
   }
 
-  function band(low, high, max) {
-    var wrap = el('span', 'whisker'), track = el('span', 'whisker-track'), range = el('span', 'whisker-range');
-    range.style.left = Math.max(0, low / max * 100) + '%';
-    range.style.width = Math.max(1, (high - low) / max * 100) + '%';
+  function band(low, estimate, high, scale, isShortlist, share) {
+    var wrap = el('span', 'whisker' + (isShortlist ? ' shortlist-whisker' : '')), track = el('span', 'whisker-track'), range = el('span', 'whisker-range');
+    var start = Math.log(Math.max(low, scale.min)) / Math.LN10;
+    var end = Math.log(Math.max(high, scale.min)) / Math.LN10;
+    var point = Math.log(Math.max(estimate, scale.min)) / Math.LN10;
+    range.style.left = Math.max(0, (start - scale.logMin) / scale.span * 100) + '%';
+    range.style.width = Math.max(1, (end - start) / scale.span * 100) + '%';
+    var marker = el('span', 'whisker-point');
+    marker.style.left = Math.max(0, Math.min(100, (point - scale.logMin) / scale.span * 100)) + '%';
+    track.appendChild(marker);
     track.appendChild(range);
-    wrap.append(track, el('small', 'band-text', usd(low) + '–' + usd(high)));
+    wrap.append(track);
+    wrap.append(el('small', 'band-text', usd(low) + '–' + usd(high) + (isShortlist ? ' · ' + share : '')));
     return wrap;
+  }
+
+  function valueScale(rows) {
+    var min = Infinity, max = 0;
+    rows.forEach(function (r) { if (r.value_low_usd > 0) min = Math.min(min, r.value_low_usd); max = Math.max(max, r.value_high_usd); });
+    if (!isFinite(min) || max <= min) { min = 1; max = 10; }
+    var logMin = Math.log(min) / Math.LN10, logMax = Math.log(max) / Math.LN10;
+    return { min: min, logMin: logMin, span: Math.max(.01, logMax - logMin) };
   }
 
   function header(d) {
@@ -114,11 +129,13 @@
     var s = el('section', 'start-here');
     s.append(el('h2', '', 'Start here'), el('p', '', 'The largest estimates with real evidence behind them.'));
     var list = el('div', 'shortlist');
-    v.shortlist.forEach(function (r) {
+    var scale = valueScale(v.data.rows);
+    v.shortlist.forEach(function (r, i) {
       var item = el('button', 'short-item');
       item.type = 'button';
       item.dataset.slug = r.slug;
-      item.append(el('b', 'short-name', r.name), el('span', 'short-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.value_high_usd, Math.max(r.value_high_usd * 1.05, r.implied_value_usd)), grade(r.confidence, gradeMeaning(v.data, r.confidence)), el('small', 'short-share', (100*r.peer_token_share).toFixed(1) + '% peers tokenized'));
+      var share = (100*r.peer_token_share).toFixed(1) + '% peers tokenized';
+      item.append(el('span', 'rank-badge num', String(i + 1)), el('b', 'short-name', r.name), el('span', 'short-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale, true, share), grade(r.confidence, gradeMeaning(v.data, r.confidence)));
       list.appendChild(item);
     });
     if (!v.shortlist.length) list.appendChild(el('p', 'muted', 'No rows have enough evidence for this shortlist.'));
@@ -129,6 +146,16 @@
   function board(v) {
     var sectionEl = el('section', 'board');
     sectionEl.append(section('Ranked board', 'Select a protocol to open its detail view.'), controls(v));
+    var results = el('div', 'board-results');
+    results.dataset.results = 'board';
+    sectionEl.appendChild(results);
+    updateBoardResults(results, v);
+    return sectionEl;
+  }
+
+  function updateBoardResults(sectionEl, v) {
+    var scale = valueScale(v.data.rows);
+    var maxTvl = v.data.rows.reduce(function (max, r) { return Math.max(max, r.tvl_usd || 0); }, 0) || 1;
     var summary = el('div', 'grade-strip');
     ['A', 'B', 'C'].forEach(function (g) {
       var item = el('span', '', g + ' '), count = el('b', '', v.grades[g]);
@@ -138,9 +165,15 @@
     summary.appendChild(tip(['A', 'B', 'C'].map(function (g) { return gradeMeaning(v.data, g); }).join(' ')));
     sectionEl.appendChild(summary);
     var table = el('table'), head = el('thead'), tr = el('tr');
-    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['TVL', 'tvl'], ['Tokenized peers', '', 'Share of category TVL held by protocols that already have a token.'], ['Implied value', 'value', 'The whisker is the uncertainty band from the calibration set’s quartiles.']].forEach(function (x) {
+    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['Tokenized peers', '', 'Share of category TVL held by protocols that already have a token.'], ['Implied value', 'value', 'The whisker is the uncertainty band: the middle half of the model’s leave-one-out backtest errors for the row’s basis, widened to cover half of them.']].forEach(function (x) {
       var th = el('th'), b = el('button', '', x[0]);
-      if (x[1]) b.dataset.sort = x[1];
+      if (x[1]) {
+        b.dataset.sort = x[1];
+        if (v.sort === x[1]) {
+          th.setAttribute('aria-sort', v.direction === 1 ? 'ascending' : 'descending');
+          b.appendChild(el('span', 'sort-marker', v.direction === 1 ? ' ↑' : ' ↓'));
+        }
+      }
       th.appendChild(b);
       if (x[2]) th.appendChild(tip(x[2]));
       tr.appendChild(th);
@@ -152,27 +185,33 @@
       var row = el('tr');
       row.tabIndex = 0;
       row.dataset.slug = r.slug;
-      var rank = el('td', 'num', r.rank), name = el('td', 'protocol', r.name), cat = el('td', '', r.category || 'Other'), tvl = el('td', 'num', usd(r.tvl_usd)), peers = el('td', 'num', (100*r.peer_token_share).toFixed(1) + '%'), val = el('td', 'estimate');
+      var rank = el('td', 'rank-cell', r.rank), name = el('td', 'protocol', r.name), cat = el('td', '', r.category || 'Other'), chains = el('td', 'chains-cell'), tvl = el('td', 'tvl-cell num'), peers = el('td', 'num', (100*r.peer_token_share).toFixed(1) + '%'), val = el('td', 'estimate');
+      var rowChains = r.chains || [];
+      chains.textContent = rowChains.length ? rowChains[0] + (rowChains.length > 1 ? ' +' + (rowChains.length - 1) : '') : '—';
+      tvl.appendChild(el('span', '', usd(r.tvl_usd)));
+      var tvlBar = el('span', 'tvl-bar'), tvlFill = el('i');
+      tvlFill.style.width = Math.max(0, Math.min(100, (r.tvl_usd || 0) / maxTvl * 100)) + '%';
+      tvlBar.appendChild(tvlFill);
+      tvl.appendChild(tvlBar);
       name.appendChild(r.watchlist ? el('small', 'watch', 'WATCHLIST') : el('span'));
       var main = el('div', 'value-line');
-      main.append(el('b', 'primary-value num', precise(r.implied_value_usd)), band(r.value_low_usd, r.value_high_usd, Math.max(r.value_high_usd * 1.05, r.implied_value_usd)));
+      main.append(el('b', 'primary-value num', precise(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale));
       main.appendChild(grade(r.confidence, gradeMeaning(v.data, r.confidence)));
       val.appendChild(main);
-      row.append(rank, name, cat, tvl, peers, val);
+      row.append(rank, name, cat, chains, tvl, peers, val);
       body.appendChild(row);
     });
     if (!v.rows.length) {
       var empty = el('tr'), cell = el('td', 'empty', 'No protocols match these filters.');
-      cell.colSpan = 6;
+      cell.colSpan = 7;
       empty.appendChild(cell);
       body.appendChild(empty);
     }
     table.appendChild(body);
     var wrap = el('div', 'table-wrap');
     wrap.appendChild(table);
-    sectionEl.appendChild(wrap);
-    sectionEl.appendChild(el('p', 'count', v.rows.length + ' of ' + v.data.rows.length + ' protocols'));
-    return sectionEl;
+    var count = el('p', 'count', v.rows.length + ' of ' + v.data.rows.length + ' protocols');
+    sectionEl.replaceChildren(summary, wrap, count);
   }
 
   function chart(v) {
@@ -192,6 +231,8 @@
     return s;
   }
 
+  var MODEL_DEFAULT_UNKNOWN_AGE_DAYS = 365;
+
   function method(d) {
     var s = el('details', 'below method disclosure'), summary = el('summary', 'disclosure-summary'), m = d.model;
     summary.append(el('b', '', 'Model and calibration'), el('span', '', d.model_version + ' estimates, calibrated only from this snapshot’s live-token set.'));
@@ -203,7 +244,18 @@
     var biasText = bias >= 0 ? 'The predicted top 10 ran high by a median ' + bias.toFixed(3) + ' log points' : 'The predicted top 10 ran low by a median ' + Math.abs(bias).toFixed(3) + ' log points';
     var bandRatios = d.rows.map(function(row) { return row.value_high_usd / row.value_low_usd; }).sort(function(a, b) { return a - b; });
     var boardMedianBandRatio = bandRatios.length % 2 ? bandRatios[(bandRatios.length - 1) / 2] : (bandRatios[bandRatios.length / 2 - 1] + bandRatios[bandRatios.length / 2]) / 2;
-    var explanation = el('p', 'method-copy', 'The model is validated by leaving out each live protocol in turn and estimating it from the rest. Large protocols are valued at a lower multiple of TVL, because that is what the issued protocols show; the measured global log-ratio slope is ' + d.size_adjustment_slope.toFixed(4) + '. The measured upward bias is corrected by a factor of ' + d.bias_correction_factor.toFixed(3) + '. The band is the middle half of the errors this model actually made in backtesting, per basis, widened just enough to cover half of them. The board median band ratio is ' + boardMedianBandRatio.toFixed(2) + '×. Separate band multipliers are calibrated for category rows (' + widths.category.toFixed(2) + '×) and global-anchored rows (' + widths.global_anchored.toFixed(2) + '×). Overall leave-one-out coverage is ' + (100*d.calibration_backtest.band_coverage).toFixed(1) + '% with median absolute log error ' + typicalError + '×. Category coverage is ' + (100*basis.category.band_coverage).toFixed(1) + '% and global-anchored coverage is ' + (100*basis.global_anchored.band_coverage).toFixed(1) + '%. The 128 leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + ' (median log error ' + bias.toFixed(3) + '); selection shrink ' + (d.selection_shrink.adopted ? 'was adopted' : 'was not adopted') + '. Calibration uses the median of winsorized, globally size-adjusted log-ratios as its centre, with unweighted peer quartiles and dispersion-aware shrinkage toward the global set. The size adjustment is linear in log TVL; tested alternatives did not meet the adoption threshold. Ratios are winsorized at the global 1st and 99th percentiles so one extreme peer cannot dominate a category. A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '. Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes receive the neutral midpoint. G2 percentile growth and M1 log-age maturity factors are normalized so their medians are 1. Missing listed_at ages use the snapshot median known age (' + d.derived_unknown_listed_age_days + ' days).  Peer share is weighted by TVL; detail shows the protocol count. Grades are support-and-precision labels: A needs at least 10 calibration peers and band ratio at most 10; B needs at least 5 peers and band ratio at most 30; all others are C. Measured error did not rise with band width alone in this snapshot, which is why peer support remains part of the grade. In leave-one-out backtesting, A carried ' + d.grade_backtest.A.count + ' estimates with ' + (100*d.grade_backtest.A.coverage).toFixed(1) + '% coverage and ' + Math.exp(d.grade_backtest.A.median_absolute_log_error).toFixed(1) + '× median absolute log error; B carried ' + d.grade_backtest.B.count + ' with ' + (100*d.grade_backtest.B.coverage).toFixed(1) + '% coverage and ' + Math.exp(d.grade_backtest.B.median_absolute_log_error).toFixed(1) + '× error; C carried ' + d.grade_backtest.C.count + ' with ' + (100*d.grade_backtest.C.coverage).toFixed(1) + '% coverage and ' + Math.exp(d.grade_backtest.C.median_absolute_log_error).toFixed(1) + '× error. Each rank carries a range from resampling the calibration ratios 200 times. Wide ranges mark ranks the evidence cannot separate. Leaving out any single calibration peer keeps on average ' + (100*d.top20_jackknife_overlap).toFixed(1) + '% of the top 20 in place.');
+    // The data carries only the age in use (model.unknown_listed_age_days is overwritten with it), so adoption is
+    // inferred against the model default; MODEL_DEFAULT_UNKNOWN_AGE_DAYS mirrors MODEL.unknown_listed_age_days (test-guarded).
+    var unknownAgeSource = d.derived_unknown_listed_age_days === MODEL_DEFAULT_UNKNOWN_AGE_DAYS ? 'model default age' : 'snapshot median known age';
+    // Present only when the fitted amplitudes were adopted (the key is absent otherwise), so the sentence above stays complete.
+    var amplitudeText = d.fitted_factor_amplitudes ? 'Before normalization each factor is raised to its fitted amplitude (growth ' + d.fitted_factor_amplitudes.growth + ', maturity ' + d.fitted_factor_amplitudes.maturity + '). ' : '';
+    // A grade with no backtest estimates has null coverage and error: print the count alone, never figures formatted from null.
+    function gradeCarried(g, noun, errorLabel) {
+      var metric = d.grade_backtest[g];
+      if (!metric.count) return metric.count + noun;
+      return metric.count + noun + ' with ' + (100*metric.coverage).toFixed(1) + '% coverage and ' + Math.exp(metric.median_absolute_log_error).toFixed(1) + errorLabel;
+    }
+    var explanation = el('p', 'method-copy', 'The model is validated by leaving out each live protocol in turn and estimating it from the rest. Large protocols are valued at a lower multiple of TVL, because that is what the issued protocols show; the measured global log-ratio slope is ' + d.size_adjustment_slope.toFixed(4) + '. The measured ' + (d.bias_correction_factor < 1 ? 'upward' : 'downward') + ' bias is corrected by a factor of ' + d.bias_correction_factor.toFixed(3) + '. The band is the middle half of the errors this model actually made in backtesting, per basis, widened just enough to cover half of them. The board median band ratio is ' + boardMedianBandRatio.toFixed(2) + '×. Separate band multipliers are calibrated for category rows (' + widths.category.toFixed(2) + '×) and global-anchored rows (' + widths.global_anchored.toFixed(2) + '×). Overall leave-one-out coverage is ' + (100*d.calibration_backtest.band_coverage).toFixed(1) + '% with median absolute log error ' + typicalError + '×. Category coverage is ' + (100*basis.category.band_coverage).toFixed(1) + '% and global-anchored coverage is ' + (100*basis.global_anchored.band_coverage).toFixed(1) + '%. The ' + d.calibration_backtest.peers_evaluated + ' leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + ' (median log error ' + bias.toFixed(3) + '); selection shrink ' + (d.selection_shrink.adopted ? 'was adopted' : 'was not adopted') + '. Calibration uses the median of winsorized, globally size-adjusted log-ratios as its centre, with unweighted peer quartiles and dispersion-aware shrinkage toward the global set. The size adjustment is linear in log TVL; tested alternatives did not meet the adoption threshold. Ratios are winsorized at the global 1st and 99th percentiles so one extreme peer cannot dominate a category. A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '. Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes receive the neutral midpoint. G2 percentile growth and M1 log-age maturity factors are normalized so their medians are 1. ' + amplitudeText + 'Missing listed_at ages use the ' + unknownAgeSource + ' (' + d.derived_unknown_listed_age_days + ' days).  Peer share is weighted by TVL; detail shows the protocol count. Grades are support-and-precision labels: A needs at least 10 calibration peers and band ratio at most 10; B needs at least 5 peers and band ratio at most 30; all others are C. Measured error did not rise with band width alone in this snapshot, which is why peer support remains part of the grade. In leave-one-out backtesting, A carried ' + gradeCarried('A', ' estimates', '× median absolute log error') + '; B carried ' + gradeCarried('B', '', '× error') + '; C carried ' + gradeCarried('C', '', '× error') + '. Each rank carries a range from resampling the calibration ratios 200 times. Wide ranges mark ranks the evidence cannot separate. Leaving out any single calibration peer keeps on average ' + (100*d.top20_jackknife_overlap).toFixed(1) + '% of the top 20 in place.');
     s.appendChild(explanation);
     var table = el('table'), head = el('thead'), tr = el('tr');
     ['Set', 'Live peers', 'Median ratio', 'Raw p25', 'Raw p75'].forEach(function (x) { tr.appendChild(el('th', '', x)); });
@@ -244,8 +296,8 @@
     if (!r) return null;
     var s = el('section', 'detail'), close = el('button', 'close', 'Close detail');
     close.dataset.close = '1';
-    s.append(close, el('h2', '', r.name), el('p', 'detail-value', precise(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
-    s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' across 200 resamples of the calibration ratios'));
+    s.append(close, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', precise(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
+    s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' from 200 calibration-set resamples, with growth and maturity factors held fixed'));
     var facts = el('div', 'facts');
     [['Category', r.category || 'Other'], ['TVL', usd(r.tvl_usd)], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.'], ['Ratio source', r.category_ratio_source + ' · ' + r.ratio_live_count + ' peers']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
     s.appendChild(facts);
@@ -263,5 +315,5 @@
     return s;
   }
 
-  global.RadarComponents = { header: header, shortlist: shortlist, board: board, chart: chart, method: method, live: live, detail: detail };
+  global.RadarComponents = { header: header, shortlist: shortlist, board: board, updateBoardResults: updateBoardResults, controls: controls, chart: chart, method: method, live: live, detail: detail };
 }(window));

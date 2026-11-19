@@ -210,6 +210,6 @@ export interface RadarData {
   residual_quantiles: { category: { r25: number; r75: number }; global_anchored: { r25: number; r75: number } };
   size_adjustment_slope: number;
   fitted_factor_amplitudes?: { growth: number; maturity: number };
-  derived_unknown_listed_age_days?: number;
+  derived_unknown_listed_age_days: number;
   top20_jackknife_overlap: number;
 }

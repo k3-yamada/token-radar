@@ -1,24 +1,15 @@
-import type { BoardRow, Calibration, ModelConstants, Snapshot, SnapshotProtocol } from './types.ts';
-import { isRankable } from './eligibility.ts';
+import type { BoardRow, Calibration, ModelConstants, Snapshot } from './types.ts';
+import { selectScoredRows } from './eligibility.ts';
 import { calibrate } from './calibration.ts';
 import { estimate, changePercentiles } from './estimate.ts';
 import { farmSteps, farmTotals, stepText } from './farmplan.ts';
 import { median, round4 } from './statistics.ts';
 import { gradeForBandRatio } from './backtest.ts';
 
-export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calibration = calibrate(snapshot), calibrationOptions: { biasFactor?: number; bandMultiplier?: number; bandMultipliers?: { category: number; global_anchored: number }; residualQuantiles?: { category: { r25: number; r75: number }; global_anchored: { r25: number; r75: number } }; sizeAdjustment?: { slope: number; center: number }; unknownAge?: number } = {}): BoardRow[] {
-  const index = new Map(snapshot.protocols.map(p => [p.slug, p]));
-  const chosen = new Map<string, SnapshotProtocol>();
-  for (const slug of snapshot.watchlist) {
-    const p = index.get(slug);
-    if (p) chosen.set(slug, p);
-  }
-  const slots = Math.max(0, Math.min(model.early_rows, model.board_max_rows - chosen.size));
+export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calibration = calibrate(snapshot), calibrationOptions: { biasFactor?: number; bandMultiplier?: number; bandMultipliers?: { category: number; global_anchored: number }; residualQuantiles?: { category: { r25: number; r75: number }; global_anchored: { r25: number; r75: number } }; sizeAdjustment?: { slope: number; center: number }; unknownAge?: number; amplitudes?: { growth: number; maturity: number }; light?: boolean } = {}): BoardRow[] {
   const percentiles = changePercentiles(snapshot.protocols);
-  const early = snapshot.protocols.filter(p => !chosen.has(p.slug) && isRankable(p)).sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0)).slice(0, slots);
-  for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map(p => {
+  const scored = selectScoredRows(snapshot, model).map(p => {
     const raw = p.category ? cal.categories.get(p.category) : undefined;
     const basis = raw?.count === 1 ? 'global_anchored' : raw?.count ? 'category' : 'global_anchored';
     const v = estimate(p, snapshot.as_of, raw ?? { count: 0, q25: 0, median: 0, q75: 0 }, cal.global, model, cal.medianChange, { factorShapes: { growth: 'G2', maturity: 'M1' }, changePercentile: percentiles.get(p.slug) ?? .5, categorySamples: p.category ? cal.samples.get(p.category) : undefined, globalSamples: cal.samples.get('global'), ...calibrationOptions, residualQuantiles: calibrationOptions.residualQuantiles?.[basis], bandMultiplier: calibrationOptions.bandMultipliers?.[basis] ?? calibrationOptions.bandMultiplier });
@@ -40,7 +31,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calib
   return scored.map(({ p, v }, i) => {
     const confidence: BoardRow['confidence'] = gradeForBandRatio(v.high / v.low, v.ratioCount);
     const peers = cal.peerCounts.get(p.category ?? 'Other') ?? { tokenized: 0, total: 0 };
-    const plan = farmTotals(p, v.age);
+    const plan = calibrationOptions.light ? { capital: 0, fees: 0, weeks: 0 } : farmTotals(p, v.age);
     return {
       rank: i + 1,
       rank_low: i + 1,
@@ -63,7 +54,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calib
       ratio_basis: v.basis,
       ratio_live_count: v.ratioCount,
       confidence,
-      peer_token_share: (() => { const members = snapshot.protocols.filter(x => (x.category ?? 'Other') === (p.category ?? 'Other')); const total = members.reduce((sum, x) => sum + x.tvl_usd, 0); return total ? members.reduce((sum, x) => sum + (x.mcap_usd !== null && x.mcap_usd > 0 ? x.tvl_usd : 0), 0) / total : 0; })(),
+      peer_token_share: calibrationOptions.light ? 0 : (() => { const members = snapshot.protocols.filter(x => (x.category ?? 'Other') === (p.category ?? 'Other')); const total = members.reduce((sum, x) => sum + x.tvl_usd, 0); return total ? members.reduce((sum, x) => sum + (x.mcap_usd !== null && x.mcap_usd > 0 ? x.tvl_usd : 0), 0) / total : 0; })(),
       plan_capital_usd: plan.capital,
       plan_fees_usd: plan.fees,
       plan_weeks: plan.weeks,
@@ -77,7 +68,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calib
         chain_multiplier: 'none',
         age_days: v.age
       },
-      farm_steps: farmSteps(p, v.age).map(stepText)
+      farm_steps: calibrationOptions.light ? [] : farmSteps(p, v.age).map(stepText)
     };
   });
 }

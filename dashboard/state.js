@@ -41,7 +41,9 @@
       watchlist: state.watchlist,
       categories: Array.from(new Set(data.rows.map(function (r) { return r.category; }).filter(Boolean))).sort(),
       chains: Array.from(new Set(data.rows.reduce(function (all, r) { return all.concat(r.chains || []); }, []))).sort(),
-      selected: state.selected
+      selected: state.selected,
+      sort: state.sort,
+      direction: state.direction
     };
   }
 

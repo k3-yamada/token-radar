@@ -1,5 +1,6 @@
 import type { BoardRow, Calibration, CalibrationSet } from './types.ts';
 import { quantile } from './statistics.ts';
+import { adjustLogRatio, blendedCalibrationCentre } from './estimate.ts';
 
 export const RESAMPLE_COUNT = 200;
 const SEED = 0x7b7a11;
@@ -20,24 +21,27 @@ function summarize(values: number[]): CalibrationSet {
 }
 
 /** Add reproducible rank intervals without changing any point estimate or point rank. */
-export function rankRanges(board: BoardRow[], calibration: Calibration): void {
+export function rankRanges(board: BoardRow[], calibration: Calibration, options: { sizeAdjustment?: { slope: number; center: number }; biasFactor?: number } = {}): void {
   const random = mulberry32(SEED);
   const ranks = new Map(board.map(row => [row.slug, [] as number[]]));
   const keys = [...calibration.samples.keys()];
   for (let iteration = 0; iteration < RESAMPLE_COUNT; iteration++) {
     const sampled = new Map<string, CalibrationSet>();
+    const sampledSamples = new Map<string, number[]>();
     for (const key of keys) {
       const source = calibration.samples.get(key)!;
       const values = Array.from({ length: source.length }, () => source[Math.floor(random() * source.length)]!);
       sampled.set(key, summarize(values));
+      sampledSamples.set(key, values);
     }
     const global = sampled.get('global') ?? { count: 0, q25: 0, median: 0, q75: 0 };
     const order = board.map(row => {
       const set = sampled.get(row.category ?? '') ?? { count: 0, q25: 0, median: 0, q75: 0 };
-      const count = set.count;
-      const weight = count ? count / (count + 6) : 0;
-      const centre = count ? weight * set.median + (1 - weight) * global.median : global.median;
-      const value = Math.max(1, Math.round(row.tvl_usd * Math.exp(centre) * row.model.growth_multiplier * row.model.maturity_multiplier));
+      const centre = blendedCalibrationCentre(set, global, sampledSamples.get(row.category ?? ''), sampledSamples.get('global'));
+      const adjustedCentre = options.sizeAdjustment
+        ? adjustLogRatio(centre, Math.log(row.tvl_usd), options.sizeAdjustment.center, options.sizeAdjustment.slope)
+        : centre;
+      const value = Math.max(1, Math.round(row.tvl_usd * Math.exp(adjustedCentre) * row.model.growth_multiplier * row.model.maturity_multiplier * (options.biasFactor ?? 1)));
       return { row, value };
     }).sort((a, b) => b.value - a.value || b.row.tvl_usd - a.row.tvl_usd || (a.row.slug < b.row.slug ? -1 : a.row.slug > b.row.slug ? 1 : 0));
     order.forEach((item, index) => ranks.get(item.row.slug)!.push(index + 1));

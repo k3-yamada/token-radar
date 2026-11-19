@@ -1,0 +1,9 @@
+{
+  "name": "token-radar-entry",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.ts",
+    "build": "node --experimental-strip-types main.ts"
+  }
+}

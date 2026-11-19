@@ -6,9 +6,12 @@ import { calibrateBacktest, factorChangeReport, gradeForBandRatio, summarizeBack
 import { median } from '../domain/statistics.ts';
 import { BASELINE_SHAPES } from '../domain/estimate.ts';
 
-export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData; rejection: string | null } {
+/** The part of `factorChangeReport` that `buildRadar` acts on; injectable so a regression can force an adoption decision. */
+export type FactorDecision = Pick<ReturnType<typeof factorChangeReport>, 'adopted_amplitudes' | 'adopted_unknown_age' | 'amplitudes' | 'unknownAge'>;
+
+export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: boolean; factorReport?: FactorDecision } = {}): { board: BoardRow[]; radar: RadarData; rejection: string | null } {
   const sizeAdjustment = globalSizeAdjustment(snapshot);
-  const factorReport = factorChangeReport(snapshot, { ...sizeAdjustment, mode: 'global' });
+  const factorReport: FactorDecision = options.factorReport ?? factorChangeReport(snapshot, { ...sizeAdjustment, mode: 'global' });
   const adoptedAmplitudes = factorReport.adopted_amplitudes ? factorReport.amplitudes : undefined;
   const unknownAge = factorReport.adopted_unknown_age ? factorReport.unknownAge : MODEL.unknown_listed_age_days;
   const calibration = calibrate(snapshot, sizeAdjustment);
@@ -22,28 +25,34 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const shrunkOverallMae = median(shrinkErrors.map(Math.abs));
   const baselineTop10Mae = diagnostics.winner_curse.top10.top.median_absolute_log_error;
   const baselineOverallMae = modelCalibration.summary.all.median_absolute_log_error;
-  const shrinkAdopted = top10Bias >= .30 && shrunkTop10Mae < baselineTop10Mae && shrunkOverallMae <= baselineOverallMae * 1.01;
+  const shrinkAdopted = options.forceShrinkAdopted ?? (top10Bias >= .30 && shrunkTop10Mae < baselineTop10Mae && shrunkOverallMae <= baselineOverallMae * 1.01);
   const gradeMetrics = Object.fromEntries((['A', 'B', 'C'] as const).map(grade => {
     const summary = summarizeBacktest(modelCalibration.observations.filter(row => gradeForBandRatio(row.bandRatio, row.peerCount) === grade)).all;
     return [grade, summary.count ? summary : { ...summary, coverage: null, band_coverage: null, median_log_error: null, median_absolute_log_error: null }];
   }));
-  const board = buildBoard(snapshot, MODEL, calibration, { biasFactor: modelCalibration.correctionFactor, bandMultipliers: modelCalibration.widthMultipliers, residualQuantiles: modelCalibration.residualQuantiles, sizeAdjustment, unknownAge });
-  rankRanges(board, calibration);
+  // Adopted amplitudes must reach the board itself (and the jackknife boards built from the same options), not only the
+  // recorded metadata and the calibration backtest. When they are not adopted the key is absent and `estimate` keeps (1,1).
+  const calibrationOptions = { biasFactor: modelCalibration.correctionFactor, bandMultipliers: modelCalibration.widthMultipliers, residualQuantiles: modelCalibration.residualQuantiles, sizeAdjustment, unknownAge, ...(adoptedAmplitudes ? { amplitudes: { growth: adoptedAmplitudes.growth, maturity: adoptedAmplitudes.maturity } } : {}) };
+  const board = buildBoard(snapshot, MODEL, calibration, calibrationOptions);
   if (shrinkAdopted) {
     const factor = Math.exp(-top10Bias);
     for (const row of board.slice(0, 10)) {
       row.implied_value_usd = Math.max(1, Math.round(row.implied_value_usd * factor));
-      row.value_low_usd = Math.max(1, Math.round(row.value_low_usd * factor));
+      row.value_low_usd = Math.min(row.implied_value_usd, Math.max(1, Math.round(row.value_low_usd * factor)));
       row.value_high_usd = Math.max(row.implied_value_usd, Math.round(row.value_high_usd * factor));
       row.model.base_usd = Math.max(1, Math.round(row.model.base_usd * factor));
     }
+    board.sort((a, b) => b.implied_value_usd - a.implied_value_usd || b.tvl_usd - a.tvl_usd || a.slug.localeCompare(b.slug));
+    board.forEach((row, index) => { row.rank = index + 1; });
   }
+  rankRanges(board, calibration, { sizeAdjustment, biasFactor: modelCalibration.correctionFactor });
   const calibrationPeers = snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   const fullTop = new Set(board.slice(0, 20).map(r => r.slug));
   let overlapTotal = 0;
   for (const peer of calibrationPeers) {
     const reduced = { ...snapshot, protocols: snapshot.protocols.filter(p => p.slug !== peer.slug) };
-    const top = buildBoard(reduced, MODEL).slice(0, 20);
+    const reducedCalibration = calibrate(reduced, sizeAdjustment);
+    const top = buildBoard(reduced, MODEL, reducedCalibration, { ...calibrationOptions, light: true }).slice(0, 20);
     overlapTotal += top.filter(r => fullTop.has(r.slug)).length / Math.max(1, fullTop.size);
   }
   const top20JackknifeOverlap = calibrationPeers.length ? overlapTotal / calibrationPeers.length : 1;
@@ -91,19 +100,25 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     plan_weeks: r.plan_weeks
   }));
 
+  // Both clauses follow the adoption decisions acted on above, so the emitted description never claims a derivation or
+  // omits an exponent the board did not use. The adopted-age wording is the historical string, byte for byte.
+  const unknownAgeClause = factorReport.adopted_unknown_age ? `unknown listed_at age is snapshot-derived (${unknownAge} days)` : `unknown listed_at age is the model default (${unknownAge} days)`;
+  const amplitudeClause = adoptedAmplitudes ? `each factor is raised to its fitted amplitude before normalization (growth ^ ${adoptedAmplitudes.growth}, maturity ^ ${adoptedAmplitudes.maturity}); ` : '';
+
   return {
     board,
     radar: {
       as_of: snapshot.as_of,
       source: snapshot.source,
       floor_usd: snapshot.floor_usd,
-      model: { ...MODEL, unknown_listed_age_days: unknownAge, factor_normalization: `growth: 1 + 0.35 * (2 * percentile - 1); maturity: 0.75 + 0.5 * ln(1 + age_days) / ln(1 + 1460); factors are median-normalized across scored rows; unknown listed_at age is snapshot-derived (${unknownAge} days)`, growth_median_change_7d: calibration.medianChange },
+      model: { ...MODEL, unknown_listed_age_days: unknownAge, factor_normalization: `growth: 1 + 0.35 * (2 * percentile - 1); maturity: 0.75 + 0.5 * ln(1 + age_days) / ln(1 + 1460); ${amplitudeClause}factors are median-normalized across scored rows; ${unknownAgeClause}`, growth_median_change_7d: calibration.medianChange },
       model_version: MODEL_VERSION,
       watchlist_size: snapshot.watchlist.length,
       board_size: board.length,
       early_size: board.filter(r => !watchlist.has(r.slug)).length,
       live_size: live.length,
       scanned_size: snapshot.protocols.length,
+      zero_tvl_excluded_from_scoring: snapshot.protocols.filter(p => p.tvl_usd === 0).length,
       rows,
       live,
       calibration: calibration.entries,
@@ -119,7 +134,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       residual_quantiles: modelCalibration.residualQuantiles,
       size_adjustment_slope: sizeAdjustment.slope,
       ...(adoptedAmplitudes ? { fitted_factor_amplitudes: { growth: adoptedAmplitudes.growth, maturity: adoptedAmplitudes.maturity } } : {}),
-      ...(factorReport.adopted_unknown_age ? { derived_unknown_listed_age_days: unknownAge } : {}),
+      // Always the unknown age in use (derived when adopted, else the MODEL default), so the dashboard never reads undefined.
+      derived_unknown_listed_age_days: unknownAge,
       top20_jackknife_overlap: top20JackknifeOverlap
     },
     rejection
