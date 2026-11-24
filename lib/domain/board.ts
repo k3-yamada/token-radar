@@ -30,7 +30,6 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants, cal: Calib
 
   return scored.map(({ p, v }, i) => {
     const confidence: BoardRow['confidence'] = gradeForBandRatio(v.high / v.low, v.ratioCount);
-    const peers = cal.peerCounts.get(p.category ?? 'Other') ?? { tokenized: 0, total: 0 };
     const plan = calibrationOptions.light ? { capital: 0, fees: 0, weeks: 0 } : farmTotals(p, v.age);
     return {
       rank: i + 1,

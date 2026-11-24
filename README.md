@@ -16,7 +16,7 @@ The dashboard is a static page with no network calls: a sortable, filterable boa
 
 ```sh
 mkdir -p out
-MAKEFUN_OUTPUT_DIR=out node main.ts --input snapshot.json
+MAKEFUN_OUTPUT_DIR=out node main.ts --input ../token-radar-01-kit/input/snapshot.json
 ```
 
 Node.js 22.18 or later. This writes board.json, data.js, dashboard/, screenshots/ and dossier.json into out/.

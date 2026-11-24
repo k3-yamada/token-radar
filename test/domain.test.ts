@@ -1,20 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { median, quantile } from '../lib/domain/statistics.ts';
 import { isPreToken, isRankable, selectScoredRows } from '../lib/domain/eligibility.ts';
 import { calibrate } from '../lib/domain/calibration.ts';
 import { adjustLogRatio, ageDays, changePercentiles, estimate, growthFactor, maturityFactor, BASELINE_SHAPES } from '../lib/domain/estimate.ts';
 import { effectiveShrinkageK } from '../lib/domain/estimate.ts';
-import { backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest } from '../lib/domain/backtest.ts';
-import { farmTotals } from '../lib/domain/farmplan.ts';
+import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest } from '../lib/domain/backtest.ts';
+import { farmSteps, farmTotals, stepText } from '../lib/domain/farmplan.ts';
 import { boardIssue } from '../lib/domain/board.ts';
 import { buildBoard } from '../lib/domain/board.ts';
 import { rankRanges } from '../lib/domain/uncertainty.ts';
 import { buildRadar } from '../lib/app/buildBoard.ts';
-import { MODEL, type BoardRow, type Snapshot, type SnapshotProtocol } from '../lib/domain/types.ts';
+import { MODEL, type BoardRow, type RadarData, type Snapshot, type SnapshotProtocol } from '../lib/domain/types.ts';
 import { parseSnapshot, SnapshotError } from '../lib/infra/snapshot.ts';
+import { option } from '../lib/infra/cli.ts';
+import { assertFiniteNumbers, emit } from '../lib/infra/emit.ts';
+import { runBacktest } from '../lib/app/runBacktest.ts';
 
 const protocol = (overrides: Partial<SnapshotProtocol> = {}): SnapshotProtocol => ({
   slug: 'alpha', name: 'Alpha', category: 'Lending', chains: ['Ethereum'], tvl_usd: 100,
@@ -125,6 +131,25 @@ test('calibration winsorizes live log ratios to the global type-7 percentile ran
   assert.equal(cal.categories.get('Bridge')?.median, expectedUpper);
 });
 
+test('statistics_label states whether an entry was computed from size-adjusted log ratios', () => {
+  const rows = [1, 2, 3, 4, 5, 6].map((ratio, i) => protocol({ slug: `peer-${i}`, category: i < 3 ? 'DEX' : 'Lending', tvl_usd: 100 * (i + 1), mcap_usd: 100 * (i + 1) * ratio }));
+  const snap = snapshot(rows);
+  const adjustment = { slope: -.3, center: median(rows.map(p => Math.log(p.tvl_usd))) };
+  const labels = (cal: ReturnType<typeof calibrate>) => ({
+    categories: [...new Set(cal.entries.filter(e => e.category !== 'global').map(e => e.statistics_label))],
+    global: cal.entries.find(e => e.category === 'global')!.statistics_label
+  });
+  // No adjustment: every entry is computed from raw (winsorized) log ratios.
+  assert.deepEqual(labels(calibrate(snap)), { categories: ['raw set statistics'], global: 'raw set statistics' });
+  // Production: category logs are size-adjusted, the global set is not, and the figures differ accordingly.
+  const production = calibrate(snap, adjustment);
+  assert.deepEqual(labels(production), { categories: ['size-adjusted set statistics'], global: 'raw set statistics' });
+  assert.notEqual(production.categories.get('Lending')!.median, calibrate(snap).categories.get('Lending')!.median);
+  assert.equal(production.global.median, calibrate(snap).global.median);
+  // The contested S1 arm adjusts the global set too, and says so.
+  assert.deepEqual(labels(calibrate(snap, adjustment, 'median', { adjustGlobal: true })), { categories: ['size-adjusted set statistics'], global: 'size-adjusted set statistics' });
+});
+
 test('rejected P1 keeps a single-peer category global-anchored with current shrinkage', () => {
   const set = { count: 1, q25: 3, median: 3, q75: 3 };
   const global = { count: 10, q25: 0, median: 0, q75: 0 };
@@ -188,6 +213,61 @@ test('farm plan fees are the exact sum of step-range midpoints and weeks stay bo
   assert.ok(long.weeks >= 4 && long.weeks <= 8);
 });
 
+test('farm plans keep the board contract in every category branch: 3-12 steps of 20-600 characters', () => {
+  // [category, a phrase only that branch's action step prints, a phrase only its risk step prints]
+  const branches: [string | null, RegExp, RegExp][] = [
+    ['Lending', /make a small borrow and repay it/, /liquidation thresholds and health factor/],
+    ['CDP', /make a small borrow and repay it/, /liquidation thresholds and health factor/],
+    ['Derivatives', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
+    ['Perpetuals', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
+    ['Options', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
+    ['Dexs', /add a balanced portion to one active liquidity pool/, /estimate impermanent loss/],
+    ['Yield Aggregator', /keep the receipt token in the same wallet/, /review smart-contract permissions/],
+    ['Liquid Staking', /keep the receipt token in the same wallet/, /lockup and unbonding period/],
+    ['Risk Curators', /keep the receipt token in the same wallet/, /slashing terms and curator permissions/],
+    ['Cross Chain Bridge', /to a second supported chain/, /review smart-contract permissions/],
+    ['Prediction Market', /deposit or other supported on-chain action/, /review smart-contract permissions/],
+    [null, /deposit or other supported on-chain action/, /review smart-contract permissions/]
+  ];
+  const shapes: Partial<SnapshotProtocol>[] = [
+    { name: 'Alpha', chains: ['Ethereum'], tvl_usd: 5e7 },
+    { name: 'B', chains: [], tvl_usd: 2e8 },
+    { name: 'Gamma Protocol', chains: ['Ethereum', 'Arbitrum', 'Base', 'Optimism', 'Polygon', 'BSC', 'Avalanche', 'Solana'], tvl_usd: 2e9 },
+    { name: 'N'.repeat(300), chains: ['C'.repeat(200)], tvl_usd: 6e9 }
+  ];
+  const assertContract = (steps: string[], label: string) => {
+    assert.ok(steps.length >= 3 && steps.length <= 12, `${label}: ${steps.length} steps`);
+    for (const step of steps) assert.ok(step.length >= 20 && step.length <= 600, `${label}: a step of ${step.length} characters`);
+  };
+  for (const [category, action, risk] of branches) {
+    for (const shape of shapes) {
+      for (const age of [null, 30, 364, 365, 2000]) {
+        const p = protocol({ category, ...shape });
+        const label = `${category ?? 'no category'} / ${p.name.slice(0, 12)} / age ${age}`;
+        const plan = farmSteps(p, age);
+        const steps = plan.map(stepText);
+        assertContract(steps, label);
+        for (const step of plan) assert.ok(step.text && step.cost && step.time, `${label}: a step lacks text, cost or time`);
+        // Step 2 is the category action and step 6 the category risk check; the 600-character cut can only drop a tail.
+        if (p.name.length < 100) {
+          assert.match(steps[1]!, action, label);
+          assert.match(steps[5]!, risk, label);
+          assert.ok(steps[3]!.includes(`for ${age !== null && age < 365 ? 8 : 4} weeks`), label);
+        }
+        // What the board publishes for this protocol is exactly these strings.
+        assert.equal(farmTotals(p, age).weeks, age !== null && age < 365 ? 8 : 4);
+      }
+    }
+  }
+  // The over-long shape really does exercise the cut, and a too-short step is padded up to the minimum.
+  assert.ok(farmSteps(protocol(shapes[3]), null).map(stepText).some(step => step.length === 599 && step.endsWith('...')));
+  assert.equal('G Cost: 0. Time: 1.'.length, 19);
+  const padded = stepText({ text: 'G', cost: '0', time: '1' });
+  assert.ok(padded.length >= 20 && padded.startsWith('G Cost: 0. Time: 1.'));
+  // The board carries the same plans: every row of a built board is inside the contract.
+  for (const row of buildBoard(followUpFixture(), MODEL)) assertContract(row.farm_steps, row.slug);
+});
+
 test('boardIssue accepts a valid synthetic board and identifies rank gaps', () => {
   const rows = Array.from({ length: 100 }, (_, i) => ({
     rank: i + 1, slug: `p${i}`, implied_value_usd: 1000 - i,
@@ -218,6 +298,42 @@ test('forced selection shrink re-sorts ranks before rank intervals and board val
     assert.equal(result.board[i]!.rank, i + 1);
     if (i) assert.ok(result.board[i - 1]!.implied_value_usd >= result.board[i]!.implied_value_usd);
   }
+  // The intervals buildRadar emits are the ones resampled under the shrink: the slugs that led the unshrunk board,
+  // scaled by exp(-bias) in every iteration. Resampling the same board without the shrink gives different intervals.
+  const sizeAdjustment = globalSizeAdjustment(snap);
+  const options = { sizeAdjustment, biasFactor: result.radar.bias_correction_factor };
+  const shrink = { slugs: new Set(buildRadar(snap, { forceShrinkAdopted: false }).board.slice(0, 10).map(row => row.slug)), factor: Math.exp(-result.radar.selection_shrink.bias_log) };
+  const intervals = (board: BoardRow[]) => board.map(row => [row.slug, row.rank_low, row.rank_high]);
+  const withShrink = structuredClone(result.board), withoutShrink = structuredClone(result.board);
+  rankRanges(withShrink, calibrate(snap, sizeAdjustment), { ...options, shrink });
+  rankRanges(withoutShrink, calibrate(snap, sizeAdjustment), options);
+  assert.deepEqual(intervals(result.board), intervals(withShrink));
+  assert.notDeepEqual(intervals(result.board), intervals(withoutShrink));
+});
+
+test('rank resampling applies the selection shrink to the shrunk slugs in every iteration', () => {
+  const row = (slug: string, tvl_usd: number, rank: number) => ({
+    slug, tvl_usd, rank, rank_low: rank, rank_high: rank, category: 'Lending',
+    model: { growth_multiplier: 1, maturity_multiplier: 1 }
+  } as BoardRow);
+  const samples = [0, 0, 0, 0];
+  const calibration = {
+    global: { count: 4, q25: 0, median: 0, q75: 0 },
+    categories: new Map([['Lending', { count: 4, q25: 0, median: 0, q75: 0 }]]),
+    samples: new Map([['global', samples], ['Lending', samples]])
+  } as ReturnType<typeof calibrate>;
+  // Point ranks after a 0.5x shrink of `leader` (1000 -> 500) put it below `chaser` (800).
+  const board = () => [row('chaser', 800, 1), row('leader', 1000, 2)];
+  const shrunk = board(), unshrunk = board(), other = board();
+  rankRanges(shrunk, calibration, { shrink: { slugs: new Set(['leader']), factor: .5 } });
+  rankRanges(unshrunk, calibration);
+  rankRanges(other, calibration, { shrink: { slugs: new Set(['absent']), factor: .5 } });
+  // Under the shrink every resample agrees with the point ranks, so the intervals are exact.
+  assert.deepEqual(shrunk.map(r => [r.slug, r.rank_low, r.rank_high]), [['chaser', 1, 1], ['leader', 2, 2]]);
+  // Without it the resamples rank the unshrunk model (leader first) and the intervals are only widened to hold the point rank.
+  assert.deepEqual(unshrunk.map(r => [r.slug, r.rank_low, r.rank_high]), [['chaser', 1, 2], ['leader', 1, 2]]);
+  // The factor touches only the named slugs.
+  assert.deepEqual(other.map(r => [r.slug, r.rank_low, r.rank_high]), unshrunk.map(r => [r.slug, r.rank_low, r.rank_high]));
 });
 
 test('rank resampling is deterministic and intervals contain point ranks', () => {
@@ -569,28 +685,401 @@ test('dashboard method text names the unknown-age source truthfully, adopted or 
   const window: { RadarComponents?: { method(d: unknown): StubNode } } = {};
   runInNewContext(source, { window, document: { createElement: node } });
   const find = (n: StubNode): StubNode | undefined => n.className === 'method-copy' ? n : n.children.map(find).find(Boolean);
+  // The copy is a lead paragraph and headed subsections: its text is its children's, one per line.
+  const text = (n: StubNode): string => n.children.length ? n.children.map(text).join('\n') : n.textContent ?? '';
   const snap = followUpFixture();
   const derived = derivedUnknownAge(snap);
   assert.notEqual(derived, MODEL.unknown_listed_age_days);
-  const copy = (adopted_unknown_age: boolean) => find(window.RadarComponents!.method(buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar))!.textContent!;
+  const copy = (adopted_unknown_age: boolean) => text(find(window.RadarComponents!.method(buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar))!);
   assert.ok(copy(true).includes(`Missing listed_at ages use the snapshot median known age (${derived} days).`));
   const rejected = copy(false);
   assert.ok(rejected.includes(`Missing listed_at ages use the model default age (${MODEL.unknown_listed_age_days} days).`));
   assert.ok(!rejected.includes('median known age'));
   assert.ok(!rejected.includes('fitted amplitude'));
-  const fitted = find(window.RadarComponents!.method(buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: true, adopted_unknown_age: false, amplitudes: { growth: 2, maturity: 3, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar))!.textContent!;
+  const fitted = text(find(window.RadarComponents!.method(buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: true, adopted_unknown_age: false, amplitudes: { growth: 2, maturity: 3, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar))!);
   assert.ok(fitted.includes('Before normalization each factor is raised to its fitted amplitude (growth 2, maturity 3). Missing listed_at ages use the model default age'));
   // The leave-one-out peer count is read from the data, not hardcoded for the sealed snapshot.
   const radar = buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar;
   assert.equal(radar.calibration_backtest.peers_evaluated, 14);
-  assert.ok(find(window.RadarComponents!.method(radar))!.textContent!.includes('The 14 leave-one-out estimates have a Spearman rank correlation'));
+  assert.ok(text(find(window.RadarComponents!.method(radar))!).includes('The 14 leave-one-out estimates have a Spearman rank correlation'));
   // A grade with no backtest estimates prints its count alone; measured grades keep their full sentence.
   const measured = { count: 4, coverage: 0.5, band_coverage: 0.5, median_log_error: 0, median_absolute_log_error: Math.log(2) };
   const empty = { count: 0, coverage: null, band_coverage: null, median_log_error: null, median_absolute_log_error: null };
-  const graded = find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: empty, B: measured, C: empty } }))!.textContent!;
-  assert.ok(graded.includes('In leave-one-out backtesting, A carried 0 estimates; B carried 4 with 50.0% coverage and 2.0× error; C carried 0. Each rank'));
-  const full = find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: measured, B: measured, C: measured } }))!.textContent!;
-  assert.ok(full.includes('A carried 4 estimates with 50.0% coverage and 2.0× median absolute log error; B carried 4 with 50.0% coverage and 2.0× error; C carried 4 with 50.0% coverage and 2.0× error. Each rank'));
+  const graded = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: empty, B: measured, C: empty } }))!);
+  // That sentence closes the Grades subsection, the last one, so it ends the copy.
+  assert.ok(graded.endsWith('\nIn leave-one-out backtesting, A carried 0 estimates; B carried 4 with 50.0% coverage and 2.0× error; C carried 0.'));
+  const full = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: measured, B: measured, C: measured } }))!);
+  assert.ok(full.endsWith('A carried 4 estimates with 50.0% coverage and 2.0× median absolute log error; B carried 4 with 50.0% coverage and 2.0× error; C carried 4 with 50.0% coverage and 2.0× error.'));
   assert.ok(!source.includes('The 128 leave-one-out'));
   assert.ok(!source.includes('calibration set’s quartiles'));
+});
+
+const SEALED_SHA256 = '42a71213519479f3a180cc5010cbbf6bd18a2447fa0ad29e4c5122b6c9184393';
+// The sealed snapshot is not vendored into this repository: it is looked up where the kit and the container mount it.
+const sealedSnapshot = (): Snapshot | null => {
+  const candidates = [process.env.TOKEN_RADAR_SNAPSHOT, '/input/snapshot.json', new URL('../../token-radar-01-kit/input/snapshot.json', import.meta.url)];
+  for (const candidate of candidates) {
+    if (!candidate || !existsSync(candidate)) continue;
+    const text = readFileSync(candidate, 'utf8');
+    if (createHash('sha256').update(text).digest('hex') === SEALED_SHA256) return parseSnapshot(text);
+  }
+  return null;
+};
+
+test('amplitude adoption gate compares the halves once the overall condition holds', () => {
+  const part = (mae: number) => ({ count: 10, coverage: .5, band_coverage: .5, median_log_error: 0, median_absolute_log_error: mae });
+  const metrics = (overall: number, first: number, second: number): ContestMetrics => ({ overall: part(overall), first_half: part(first), second_half: part(second) });
+  const base = metrics(1, 1, 1);
+  // Overall condition true in every case but the last, so the halves comparison is what decides.
+  assert.equal(adoptFittedAmplitudes(metrics(.97, 1.01, 1.01), base), true);
+  assert.equal(adoptFittedAmplitudes(metrics(.9, .9, .9), base), true);
+  assert.equal(adoptFittedAmplitudes(metrics(.9, 1.02, .9), base), false);
+  assert.equal(adoptFittedAmplitudes(metrics(.9, .9, 1.02), base), false);
+  assert.equal(adoptFittedAmplitudes(metrics(.98, .9, .9), base), false);
+  // The report carries the metrics the gate reads, and its decision is the gate's.
+  const report = factorChangeReport(followUpFixture(), { mode: 'global', slope: -.2 });
+  for (const arm of [report.baseline, report.fitted]) for (const key of ['overall', 'first_half', 'second_half'] as const) assert.ok(Number.isFinite(arm[key].median_absolute_log_error));
+  assert.equal(report.adopted_amplitudes, adoptFittedAmplitudes(report.fitted, report.baseline));
+});
+
+test('sealed snapshot: fitted amplitudes are still not adopted', t => {
+  const sealed = sealedSnapshot();
+  if (!sealed) return t.skip('sealed snapshot not found (set TOKEN_RADAR_SNAPSHOT or mount /input/snapshot.json)');
+  const report = factorChangeReport(sealed, { ...globalSizeAdjustment(sealed), mode: 'global' });
+  assert.equal(report.adopted_amplitudes, false);
+});
+
+test('backtest coverage is scored against the band estimate() emits', () => {
+  // Asymmetric band, 0.1 below the centre and 1.0 above: a realized value 2x the prediction is inside, half of it is not.
+  assert.equal(withinBand(-Math.log(2), .1, 1), true);
+  assert.equal(withinBand(Math.log(2), .1, 1), false);
+  assert.equal(withinBand(Math.log(2), .1, 1, 7), true);
+  const snap = followUpFixture();
+  const inside = (row: { predictedValue: number; realizedValue: number; lowLogDistance: number; highLogDistance: number }, width: number) => {
+    const actual = Math.log(row.realizedValue), centre = Math.log(row.predictedValue);
+    return actual >= centre - width * row.lowLogDistance && actual <= centre + width * row.highLogDistance;
+  };
+  // Peer-quartile band (no residual quantiles): distances are centre - q25 and q75 - centre of the emitted band.
+  const raw = backtest(snap, { bandMultiplier: 1.3 });
+  assert.ok(raw.some(row => row.covered) && raw.some(row => !row.covered));
+  for (const row of raw) assert.equal(row.covered, inside(row, 1.3), row.slug);
+  // The fixture separates the two readings: at least one row is scored differently by the swapped test.
+  assert.ok(raw.some(row => row.covered !== (row.logError >= -1.3 * row.lowLogDistance && row.logError <= 1.3 * row.highLogDistance)));
+  // Residual band [centre + m * r25, centre + m * r75], as buildRadar hands it to estimate().
+  const model = calibrateBacktest(snap);
+  for (const row of model.observations) {
+    const key = row.basis === 'category' ? 'category' : 'global_anchored';
+    const m = model.widthMultipliers[key], r = model.residualQuantiles[key];
+    assert.equal(row.lowLogDistance, -r.r25);
+    assert.equal(row.highLogDistance, r.r75);
+    const actual = Math.log(row.realizedValue / row.predictedValue);
+    assert.equal(row.covered, actual >= m * r.r25 && actual <= m * r.r75, row.slug);
+  }
+});
+
+// ---- Dashboard (radar-20 follow-up fixes, batch 7) ----
+// A minimal DOM: enough for components.js to build its trees so their structure can be asserted without a browser.
+type DomNode = { tagName: string; className: string; textContent: string; children: DomNode[]; dataset: Record<string, string>; style: Record<string, string>; attributes: Record<string, string>; tabIndex?: number; [key: string]: unknown };
+const domNode = (tag: string): DomNode => {
+  let text = '';
+  return {
+    tagName: tag, className: '', children: [], dataset: {}, style: {}, attributes: {},
+    get textContent() { return text + this.children.map(c => c.textContent).join(''); },
+    set textContent(value: string) { text = String(value); this.children.length = 0; },
+    append(...c: DomNode[]) { this.children.push(...c); },
+    appendChild(c: DomNode) { this.children.push(c); return c; },
+    replaceChildren(...c: DomNode[]) { this.children.splice(0, this.children.length, ...c); },
+    setAttribute(name: string, value: string) { this.attributes[name] = String(value); }
+  } as DomNode;
+};
+const walk = (n: DomNode, visit: (n: DomNode, ancestors: DomNode[]) => void, ancestors: DomNode[] = []): void => { visit(n, ancestors); n.children.forEach(c => walk(c, visit, [...ancestors, n])); };
+const all = (n: DomNode, pick: (n: DomNode) => boolean): DomNode[] => { const found: DomNode[] = []; walk(n, x => { if (pick(x)) found.push(x); }); return found; };
+const hasClass = (name: string) => (n: DomNode) => String(n.className).split(' ').includes(name);
+type DashRow = Record<string, any>;
+type DashView = { rows: DashRow[]; top: DashRow[]; shortlist: DashRow[]; grades: Record<string, number>; sort: string; direction: number; data: Record<string, any> };
+type Dashboard = {
+  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode };
+  State: { compute(): DashView; update(patch: Record<string, unknown>): DashView; sortBy(key: string): DashView };
+};
+const loadDashboard = (radar: unknown): Dashboard => {
+  const window: Record<string, any> = { RADAR: radar };
+  for (const file of ['state.js', 'components.js']) runInNewContext(readFileSync(new URL(`../dashboard/${file}`, import.meta.url), 'utf8'), { window, document: { createElement: domNode } });
+  return { UI: window.RadarComponents, State: window.RadarState };
+};
+// out/data.js is the build output for the sealed snapshot; it is not vendored, so tests on it skip where it is absent.
+const sealedRadar = (): Record<string, any> | null => {
+  const path = new URL('../out/data.js', import.meta.url);
+  if (!existsSync(path)) return null;
+  const window: Record<string, any> = {};
+  runInNewContext(readFileSync(path, 'utf8'), { window });
+  return window.RADAR ?? null;
+};
+const dashboardFixtureRadar = () => buildRadar(followUpFixture(), { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: MODEL.unknown_listed_age_days } }).radar;
+const percent = (value: string) => { assert.match(value, /^-?[\d.]+%$/); return Number(value.slice(0, -1)); };
+const assertChartFits = (chart: DomNode, expectedRows: number) => {
+  const tracks = all(chart, hasClass('bar-track'));
+  assert.equal(tracks.length, expectedRows);
+  for (const track of tracks) {
+    const [point, range] = track.children as [DomNode, DomNode];
+    const left = percent(range.style.left!), width = percent(range.style.width!);
+    assert.ok(left >= 0 && width > 0 && left + width <= 100 + 1e-9, `band leaves its track: left ${left}% + width ${width}%`);
+    assert.ok(percent(point.style.width!) <= 100);
+  }
+};
+
+test('chart bands stay inside their tracks when a high exceeds the top point estimate', () => {
+  const { UI } = loadDashboard(dashboardFixtureRadar());
+  const row = (name: string, low: number, implied: number, high: number) => ({ name, confidence: 'C', value_low_usd: low, implied_value_usd: implied, value_high_usd: high });
+  // The second row's high is ten times the top point estimate; the last is a hairline band at the far end of the scale.
+  const top = [row('a', 50, 100, 300), row('b', 40, 90, 1000), row('c', 999, 999, 1000)];
+  const chart = UI.chart({ top, data: dashboardFixtureRadar() });
+  assertChartFits(chart, 3);
+  const ranges = all(chart, hasClass('bar-whisker'));
+  assert.equal(percent(ranges[1]!.style.left!) + percent(ranges[1]!.style.width!), 100);
+  assert.equal(percent(all(chart, hasClass('bar-point'))[0]!.style.width!), 10);
+});
+
+test('sealed data: every chart band fits its track (left% + width% <= 100)', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found (run npm run build against the sealed snapshot)');
+  const { UI, State } = loadDashboard(radar);
+  const v = State.compute();
+  // The premise of the fix: on this data some highs are several times the top point estimate.
+  assert.ok(v.top.some(r => r.value_high_usd > v.top[0]!.implied_value_usd));
+  assertChartFits(UI.chart(v), 20);
+});
+
+test('usd and ratio formatting never print an exponent; a figure rounding to 1000 moves to the next unit', () => {
+  const { UI } = loadDashboard(dashboardFixtureRadar());
+  assert.equal(UI.usd(999500), '$1M');
+  assert.equal(UI.usd(999499), '$999K');
+  assert.equal(UI.usd(999.5), '$1K');
+  assert.equal(UI.usd(999.4), '$999');
+  assert.equal(UI.usd(999_500_000), '$1B');
+  assert.equal(UI.usd(999_500_000_000), '$1T');
+  assert.equal(UI.usd(1.5e12), '$1.5T');
+  assert.equal(UI.usd(2.5e16), '$25000T');
+  assert.equal(UI.usd(-999500), '$-1M');
+  // Unchanged figures.
+  assert.deepEqual([0, 1, 12.34, 150, 46.5, 1000, 80108011, 2757585593].map(UI.usd), ['$0', '$1', '$12.3', '$150', '$46.5', '$1K', '$80.1M', '$2.76B']);
+  assert.equal(UI.usd(NaN), '—');
+  assert.deepEqual([0.7874587727137458, 1, 12.345, 999.4].map(UI.ratio), ['0.787×', '1.00×', '12.3×', '999×']);
+  assert.deepEqual([999.5, 1234.5, 123456789, 1e21, 1.234e-7].map(UI.ratio), ['1000×', '1230×', '123000000×', '1000000000000000000000×', '0.000000123×']);
+  for (const n of [999.5, 1e3, 5e5, 1e9, 1e15, 1e21, 1e30, 1e-7, 1e-12]) {
+    assert.ok(!/e/i.test(UI.ratio(n)), UI.ratio(n));
+    assert.ok(!/e/i.test(UI.usd(n)), UI.usd(n));
+  }
+  // The method table goes through the same formatter.
+  const radar = dashboardFixtureRadar();
+  const big = { ...radar, calibration: radar.calibration.map((x: Record<string, unknown>) => ({ ...x, median_ratio: 4321.5, p75_ratio: 2.5e7 })) };
+  const cells = all(UI.method(big), n => n.tagName === 'td').map(n => n.textContent);
+  assert.ok(cells.includes('4320×') && cells.includes('25000000×'));
+  assert.ok(cells.every(c => !/\de[+-]\d/.test(c)));
+});
+
+test('info tips are never inside a button or inside the element that opens the detail', () => {
+  const radar = dashboardFixtureRadar();
+  const { UI, State } = loadDashboard(radar);
+  const v = State.compute();
+  assert.ok(v.shortlist.length > 0 && v.rows.length > 0);
+  const isTip = hasClass('info-tip');
+  for (const tree of [UI.shortlist(v), UI.board(v), UI.chart(v), UI.detail(radar, v.rows[0]!.slug)]) {
+    walk(tree, (n, ancestors) => {
+      if (n.tabIndex === undefined && n.tagName !== 'button') return;
+      assert.ok(!ancestors.some(a => a.tagName === 'button'), `focusable ${n.tagName}.${n.className} nested in a button`);
+    });
+  }
+  // Shortlist: one card per row; the opener is a button inside the card, the tip is the button's sibling.
+  const cards = all(UI.shortlist(v), hasClass('short-item'));
+  assert.equal(cards.length, v.shortlist.length);
+  cards.forEach((card, i) => {
+    assert.equal(card.tagName, 'div');
+    assert.equal(card.dataset.slug, undefined);
+    const openers = all(card, n => n.dataset.slug !== undefined);
+    assert.equal(openers.length, 1);
+    assert.equal(openers[0]!.tagName, 'button');
+    assert.equal(openers[0]!.dataset.slug, v.shortlist[i]!.slug);
+    assert.equal(openers[0]!.textContent, v.shortlist[i]!.name);
+    assert.equal(all(openers[0]!, isTip).length, 0);
+    assert.equal(all(card, isTip).length, 1);
+  });
+  // Board rows keep their tips (a row is not a button); app.js is what keeps a tip from opening the detail.
+  const app = readFileSync(new URL('../dashboard/app.js', import.meta.url), 'utf8');
+  assert.ok(app.includes("if (e.target.closest('.info-tip')) return;"));
+  assert.ok(app.includes("e.target.matches('tr[data-slug]')"));
+  assert.equal(app.split("addEventListener('change'").length, 1);
+});
+
+test('sorting starts magnitudes descending and text ascending, and flips on a repeat click', () => {
+  const { State } = loadDashboard(dashboardFixtureRadar());
+  const first = (key: string) => { const v = State.sortBy(key); return [v.sort, v.direction]; };
+  assert.deepEqual(first('tvl'), ['tvl', -1]);
+  assert.deepEqual(first('tvl'), ['tvl', 1]);
+  assert.deepEqual(first('value'), ['value', -1]);
+  const byValue = State.compute().rows.map(r => r.implied_value_usd);
+  assert.deepEqual(byValue, [...byValue].sort((a, b) => b - a));
+  assert.deepEqual(first('name'), ['name', 1]);
+  assert.deepEqual(first('name'), ['name', -1]);
+  assert.deepEqual(first('category'), ['category', 1]);
+  assert.deepEqual(first('value'), ['value', -1]);
+  assert.deepEqual(first('rank'), ['rank', 1]);
+  assert.deepEqual(State.compute().rows.map(r => r.rank), State.compute().rows.map((_, i) => i + 1));
+});
+
+test('grade strip counts the filtered rows it sits above, in a results region that persists', () => {
+  const radar = dashboardFixtureRadar();
+  const { UI, State } = loadDashboard(radar);
+  const count = (v: DashView) => { const c: Record<string, number> = { A: 0, B: 0, C: 0 }; v.rows.forEach(r => { c[r.confidence]++; }); return c; };
+  const unfiltered = State.compute();
+  assert.equal(unfiltered.rows.length, radar.rows.length);
+  assert.deepEqual({ ...unfiltered.grades }, count(unfiltered));
+  const board = UI.board(unfiltered);
+  const results = all(board, n => n.dataset.results === 'board')[0]!;
+  const [strip, wrap, live] = results.children as [DomNode, DomNode, DomNode];
+  assert.equal(live.attributes['aria-live'], 'polite');
+  assert.equal(live.textContent, `${radar.rows.length} of ${radar.rows.length} protocols`);
+  // Only the count is a live region, and the three filter selects are named.
+  assert.equal(all(board, n => n.attributes['aria-live'] !== undefined).length, 1);
+  assert.deepEqual(all(board, n => n.tagName === 'select').map(n => n.attributes['aria-label']), ['Filter by category', 'Filter by chain', 'Filter by grade']);
+  assert.ok(!readFileSync(new URL('../dashboard/index.html', import.meta.url), 'utf8').includes('aria-live'));
+  const grade = unfiltered.rows[0]!.confidence as string;
+  const filtered = State.update({ grade });
+  assert.ok(filtered.rows.length > 0 && filtered.rows.length <= radar.rows.length);
+  for (const g of ['A', 'B', 'C']) assert.equal(filtered.grades[g], g === grade ? filtered.rows.length : 0);
+  UI.updateBoardResults(results, filtered);
+  // Same three nodes, new contents.
+  assert.deepEqual(results.children, [strip, wrap, live]);
+  assert.equal(live.textContent, `${filtered.rows.length} of ${radar.rows.length} protocols`);
+  assert.equal(strip.textContent.replace(/i$/, ''), ['A', 'B', 'C'].map(g => `${g} ${filtered.grades[g]}`).join(''));
+  assert.equal(all(wrap, n => n.tagName === 'tr' && n.dataset.slug !== undefined).length, filtered.rows.length);
+  const none = State.update({ query: 'no such protocol' });
+  assert.deepEqual({ ...none.grades }, { A: 0, B: 0, C: 0 });
+});
+
+test('detail shows the derivation step by step and labels which peer measure it prints', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI } = loadDashboard(radar);
+    const calibrated = new Set(radar.calibration.map((x: { category: string }) => x.category));
+    for (const r of radar.rows as DashRow[]) {
+      const detail = UI.detail(radar, r.slug);
+      assert.ok(all(detail, n => n.tagName === 'h3').some(n => n.textContent === 'Derivation and farm plan'));
+      const steps = all(all(detail, hasClass('derivation'))[0]!, n => n.tagName === 'li').map(n => n.textContent);
+      assert.equal(steps.length, 3);
+      assert.ok(steps[0]!.startsWith(`TVL ${UI.usd(r.tvl_usd)} × ratio ${r.category_ratio_used} × bias correction ${radar.bias_correction_factor.toFixed(3)} = base ${UI.usd(r.base_usd)}.`), steps[0]);
+      assert.ok(steps[0]!.includes(r.ratio_basis === 'category' ? `the ${r.category_ratio_source} set (${r.ratio_live_count} live peers)` : 'the global set'), steps[0]);
+      assert.ok(steps[1]!.startsWith(`Base ${UI.usd(r.base_usd)} × growth multiplier ${r.growth_multiplier} = `), steps[1]);
+      assert.ok(steps[2]!.includes(` × maturity multiplier ${r.maturity_multiplier} = implied value ${UI.usd(r.implied_value_usd)}.`), steps[2]);
+      assert.ok(steps[2]!.includes(r.age_days == null ? `the ${radar.derived_unknown_listed_age_days}-day fallback age is used` : `age used: ${r.age_days} days`), steps[2]);
+      // The arithmetic the steps print is the arithmetic the model did (no selection shrink on these boards).
+      assert.ok(Math.abs(r.tvl_usd * r.category_ratio_used * radar.bias_correction_factor / r.base_usd - 1) < .01);
+      assert.ok(Math.abs(r.base_usd * r.growth_multiplier * r.maturity_multiplier / r.implied_value_usd - 1) < .01);
+      assert.ok(!steps[0]!.includes('selection shrink'));
+      assert.equal(all(detail, n => n.tagName === 'li').length, 3 + r.farm_steps.length);
+      const peers = all(detail, hasClass('peer-detail'))[0]!.textContent;
+      assert.ok(peers.startsWith(calibrated.has(r.category || 'Other') ? 'Tokenized peers, by protocol count: ' : 'Tokenized peers, by TVL share '), peers);
+    }
+  };
+  const fixture = dashboardFixtureRadar();
+  assert.equal(fixture.selection_shrink.adopted, false);
+  check(fixture);
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  if (sealed.selection_shrink.adopted) return t.diagnostic('sealed board adopted the selection shrink: arithmetic check not applicable');
+  check(sealed);
+});
+
+test('snapshot parser rejects empty names, wrong-typed figures and duplicate watchlist slugs', () => {
+  const raw = (protocols: unknown[], watchlist: unknown[] = []) => JSON.stringify({ as_of: '2025-01-01', source: 'fixture', floor_usd: 10, protocols, watchlist });
+  const p = (overrides: Record<string, unknown> = {}) => ({ slug: 'alpha', name: 'Alpha', tvl_usd: 1, ...overrides });
+  const message = (text: string) => { try { parseSnapshot(text); } catch (error) { assert.ok(error instanceof SnapshotError); return error.message; } return assert.fail('parsed'); };
+  for (const overrides of [{ slug: '' }, { slug: '  ' }, { name: '' }, { name: ' \t\n' }]) assert.match(message(raw([p(overrides)])), /protocol 0 has an empty slug or name/);
+  for (const mcap_usd of ['1000', true, [], {}]) assert.match(message(raw([p({ mcap_usd })])), /protocol 0 has an mcap_usd that is not a number/);
+  for (const change_7d of ['0.1', false, [], {}]) assert.match(message(raw([p({ change_7d })])), /protocol 0 has a change_7d that is not a number/);
+  // JSON has no NaN or Infinity literal, but an overflowing literal parses to Infinity.
+  assert.match(message(raw([p()]).replace('"tvl_usd":1', '"tvl_usd":1,"mcap_usd":1e999')), /mcap_usd that is not a number/);
+  assert.match(message(raw([p()]).replace('"tvl_usd":1', '"tvl_usd":1,"change_7d":-1e999')), /change_7d that is not a number/);
+  assert.match(message(raw([p()], ['alpha', 'beta', 'alpha'])), /watchlist has duplicate slug alpha/);
+  // Absent and null still mean "not recorded", and the other coercions are untouched.
+  const parsed = parseSnapshot(raw([p({ mcap_usd: null, change_7d: null }), p({ slug: 'beta', mcap_usd: 0, change_7d: -.5, category: 7, chains: ['Ethereum', 3], gecko_id: 1, symbol: null })], ['alpha', 'beta']));
+  assert.deepEqual(parsed.protocols.map(row => [row.mcap_usd, row.change_7d]), [[null, null], [0, -.5]]);
+  assert.deepEqual([parsed.protocols[1]!.category, parsed.protocols[1]!.chains, parsed.protocols[1]!.gecko_id], [null, ['Ethereum'], null]);
+  assert.deepEqual(parseSnapshot(raw([p()])).protocols[0]!.mcap_usd, null);
+  // Kept leniency: the sealed snapshot records one protocol with mcap_usd -1, so a negative figure passes through.
+  assert.equal(parseSnapshot(raw([p({ mcap_usd: -1 })])).protocols[0]!.mcap_usd, -1);
+});
+
+test('sealed snapshot: still parses, and carries the negative mcap_usd the parser must keep accepting', t => {
+  const sealed = sealedSnapshot();
+  if (!sealed) return t.skip('sealed snapshot not found (set TOKEN_RADAR_SNAPSHOT or mount /input/snapshot.json)');
+  assert.equal(sealed.protocols.length, 758);
+  assert.deepEqual(sealed.protocols.filter(row => row.mcap_usd !== null && row.mcap_usd < 0).map(row => row.mcap_usd), [-1]);
+});
+
+test('a flag followed by another flag has no value and falls back', () => {
+  const node = ['node', 'main.ts'];
+  assert.equal(option([...node, '--input', '--output', '/tmp/out'], 'input', '/input'), '/input');
+  assert.equal(option([...node, '--input', '--output', '/tmp/out'], 'output', '/output'), '/tmp/out');
+  assert.equal(option([...node, '--input', 'snapshot.json', '--output', '/tmp/out'], 'input', '/input'), 'snapshot.json');
+  assert.equal(option([...node, '--input=snapshot.json', '--output=/tmp/out'], 'output', '/output'), '/tmp/out');
+  // A valueless flag does not hide an equals form of the same flag; a trailing flag and an absent one take the default.
+  assert.equal(option([...node, '--input', '--output', '/tmp/out', '--input=a.json'], 'input', '/input'), 'a.json');
+  assert.equal(option([...node, '--output', '/tmp/out', '--input'], 'input', '/input'), '/input');
+  assert.equal(option(node, 'input', '/input'), '/input');
+  assert.equal(option([...node, '--input', '-'], 'input', '/input'), '-');
+});
+
+test('emit refuses a non-finite number and names where it sits', () => {
+  assert.doesNotThrow(() => assertFiniteNumbers({ a: [1, -0, 2.5, null, 'NaN', true, { b: undefined }] }, 'radar'));
+  assert.throws(() => assertFiniteNumbers({ rows: [{ x: 1 }, { x: 1, model: { base_usd: NaN } }] }, 'radar'), { message: 'emit: radar.rows[1].model.base_usd is NaN, not a finite number' });
+  assert.throws(() => assertFiniteNumbers([{ value_high_usd: Infinity }], 'board.rows'), { message: 'emit: board.rows[0].value_high_usd is Infinity, not a finite number' });
+  // Nothing is written when the guard fires: the output directory is not even created.
+  const output = join(tmpdir(), `token-radar-emit-${process.pid}`);
+  const row = { ...buildBoard(snapshot([protocol()]), MODEL, calibrate(snapshot([protocol()])))[0]!, implied_value_usd: -Infinity };
+  assert.throws(() => emit(output, [row], {} as RadarData), /board\.rows\[0\]\.implied_value_usd is -Infinity/);
+  assert.ok(!existsSync(output));
+});
+
+test('runBacktest evaluates under the conditions buildRadar does, and calibrates the fixed-k arm on its own', () => {
+  const fixture = followUpFixture();
+  const report = runBacktest(fixture);
+  const { radar } = buildRadar(fixture);
+  assert.deepEqual({ peers_evaluated: report.all.count, ...report.all, by_basis: report.by_basis }, radar.calibration_backtest);
+  assert.equal(report.bias_correction_factor, radar.bias_correction_factor);
+  assert.deepEqual(report.band_width_multipliers, radar.band_width_multipliers);
+  assert.equal(report.unknown_listed_age_days, radar.derived_unknown_listed_age_days);
+  const adjustment = globalSizeAdjustment(fixture);
+  const decision = factorChangeReport(fixture, { ...adjustment, mode: 'global' });
+  const fixedK = calibrateBacktest(fixture, BASELINE_SHAPES, { mode: 'global', slope: adjustment.slope }, { fitAmplitudes: decision.adopted_amplitudes, derivedUnknownAge: decision.adopted_unknown_age, dispersionShrinkage: false });
+  assert.equal(report.dispersion_effect.fixed_k_6.bias_correction_factor, fixedK.correctionFactor);
+  assert.deepEqual(report.dispersion_effect.fixed_k_6.band_width_multipliers, fixedK.widthMultipliers);
+  assert.equal(report.dispersion_effect.fixed_k_6.all_median_absolute_log_error, fixedK.summary.all.median_absolute_log_error);
+  assert.equal(report.dispersion_effect.with_dispersion.bias_correction_factor, report.bias_correction_factor);
+});
+
+test('sealed snapshot: runBacktest reproduces the build\'s calibration backtest at the derived unknown age', t => {
+  const sealed = sealedSnapshot();
+  if (!sealed) return t.skip('sealed snapshot not found (set TOKEN_RADAR_SNAPSHOT or mount /input/snapshot.json)');
+  const report = runBacktest(sealed);
+  assert.equal(report.unknown_listed_age_days, 677);
+  assert.equal(report.bias_correction_factor, 1.2740248278850528);
+  assert.equal(report.all.median_absolute_log_error, 1.237768277352068);
+  // The fixed-k arm is recalibrated, so its correction factor is its own, not the with-dispersion arm's.
+  assert.notEqual(report.dispersion_effect.fixed_k_6.bias_correction_factor, report.bias_correction_factor);
+});
+
+test('runBacktest measures its contest arms under the build\'s factor decisions: W0 is the reported model', () => {
+  const fixture = followUpFixture();
+  const report = runBacktest(fixture);
+  const adjustment = globalSizeAdjustment(fixture);
+  const decision = factorChangeReport(fixture, { ...adjustment, mode: 'global' });
+  // The baseline contest arm is the model the report describes, so every other arm differs from it in one setting only.
+  assert.deepEqual(report.measurements.contest.W0, { all: report.all, by_basis: report.by_basis });
+  assert.deepEqual(report.measurements.contest.P0, report.measurements.contest.W0);
+  const variants = { fitAmplitudes: decision.adopted_amplitudes, derivedUnknownAge: decision.adopted_unknown_age };
+  assert.deepEqual(report.measurements, measurementReport(fixture, variants));
+  // The fixture adopts the derived unknown age and has undated peers, so the model-default arm is a different measurement.
+  assert.equal(decision.adopted_unknown_age, true);
+  assert.notDeepEqual(measurementReport(fixture).contest.W0, report.measurements.contest.W0);
+  // The slopes do not depend on the factor settings.
+  assert.equal(measurementReport(fixture).global_ratio_slope, report.measurements.global_ratio_slope);
 });

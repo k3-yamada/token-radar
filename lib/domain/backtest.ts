@@ -8,8 +8,11 @@ export interface BacktestObservation {
   slug: string;
   basis: 'category' | 'global-anchored' | 'global';
   covered: boolean;
+  /** ln(predicted / realized): positive when the model over-predicts. */
   logError: number;
+  /** Log distance from the band centre down to the band's lower edge (centre - low), at width 1. */
   lowLogDistance: number;
+  /** Log distance from the band centre up to the band's upper edge (high - centre), at width 1. */
   highLogDistance: number;
   bandRatio: number;
   peerCount: number;
@@ -34,6 +37,15 @@ export interface ContestMetrics {
   overall: ReturnType<typeof summarizeBacktest>['all'];
   first_half: ReturnType<typeof summarizeBacktest>['all'];
   second_half: ReturnType<typeof summarizeBacktest>['all'];
+}
+
+/**
+ * Whether the realized value lies inside the band [centre - width * low, centre + width * high] (log space) that
+ * `estimate` emits. logError is ln(predicted / realized), so the realized value is above the centre when logError is
+ * negative: it is inside iff -width * high <= logError <= width * low. The upper distance bounds the negative side.
+ */
+export function withinBand(logError: number, lowLogDistance: number, highLogDistance: number, width = 1): boolean {
+  return logError >= -width * highLogDistance && logError <= width * lowLogDistance;
 }
 
 function contestMetrics(rows: BacktestObservation[]): ContestMetrics {
@@ -73,7 +85,7 @@ function ensembleContest(snapshot: Snapshot, adjustment: SizeAdjustment) {
     const high = Math.exp(peers.reduce((sum, item) => sum + Math.log(item.predictedValue) + item.highLogDistance, 0) / peers.length);
     const realizedValue = row.realizedValue;
     const logError = Math.log(predictedValue / realizedValue);
-    return { ...row, predictedValue, realizedValue, logError, lowLogDistance: Math.log(predictedValue / low), highLogDistance: Math.log(high / predictedValue), covered: logError >= -Math.log(predictedValue / low) && logError <= Math.log(high / predictedValue), impliedLow: low, impliedHigh: high };
+    return { ...row, predictedValue, realizedValue, logError, lowLogDistance: Math.log(predictedValue / low), highLogDistance: Math.log(high / predictedValue), covered: withinBand(logError, Math.log(predictedValue / low), Math.log(high / predictedValue)), impliedLow: low, impliedHigh: high };
   });
   const bias = Math.exp(-median(joined.map(row => row.logError)));
   const corrected = joined.map(row => ({ ...row, predictedValue: row.predictedValue * bias, logError: row.logError + Math.log(bias) }));
@@ -83,7 +95,7 @@ function ensembleContest(snapshot: Snapshot, adjustment: SizeAdjustment) {
   };
   const final = corrected.map(row => {
     const width = widths[row.basis === 'category' ? 'category' : 'global_anchored'];
-    return { ...row, covered: row.logError >= -width * row.lowLogDistance && row.logError <= width * row.highLogDistance, bandRatio: Math.exp(width * (row.lowLogDistance + row.highLogDistance)) };
+    return { ...row, covered: withinBand(row.logError, row.lowLogDistance, row.highLogDistance, width), bandRatio: Math.exp(width * (row.lowLogDistance + row.highLogDistance)) };
   });
   return contestMetrics(final);
 }
@@ -286,7 +298,7 @@ export function backtest(snapshot: Snapshot, options: {
     const width = options.bandMultipliers?.[prediction.basis === 'category' ? 'category' : 'global_anchored'] ?? options.bandMultiplier ?? 1;
     const lowLogDistance = prediction.centre - prediction.q25;
     const highLogDistance = prediction.q75 - prediction.centre;
-    const covered = logError >= -width * lowLogDistance && logError <= width * highLogDistance;
+    const covered = withinBand(logError, lowLogDistance, highLogDistance, width);
     const bandRatio = prediction.high / Math.max(1, prediction.low);
     observations.push({ slug: peer.slug, basis: prediction.basis, covered, logError, lowLogDistance, highLogDistance, bandRatio, peerCount: prediction.ratioCount, blendWeight: prediction.blendWeight, predictedValue: prediction.implied * Math.exp(normalization), realizedValue: peer.mcap_usd! });
   }
@@ -355,7 +367,7 @@ export function bestBandMultiplier(rows: BacktestObservation[]): number {
   let closest = Infinity;
   for (let step = 50; step <= 300; step++) {
     const candidate = step / 100;
-    const coverage = rows.length ? rows.filter(row => row.logError >= -candidate * row.lowLogDistance && row.logError <= candidate * row.highLogDistance).length / rows.length : 0;
+    const coverage = rows.length ? rows.filter(row => withinBand(row.logError, row.lowLogDistance, row.highLogDistance, candidate)).length / rows.length : 0;
     const distance = Math.abs(coverage - .5);
     if (distance < closest) {
       closest = distance;
@@ -365,7 +377,7 @@ export function bestBandMultiplier(rows: BacktestObservation[]): number {
   return best;
 }
 
-export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes = BASELINE_SHAPES, sizeAdjustment?: SizeAdjustment, variants: { peerWeighting?: 'uniform' | 'kernel'; singlePeerBlend?: boolean; centreEstimator?: CentreEstimator; model?: typeof MODEL; shrinkage?: { base: number; min: number; max: number }; factorWeight?: number; fitAmplitudes?: boolean; derivedUnknownAge?: boolean; calibrationOptions?: CalibrationOptions; bandContinuity?: 'current' | 'threshold' | 'interpolate' } = {}) {
+export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes = BASELINE_SHAPES, sizeAdjustment?: SizeAdjustment, variants: { peerWeighting?: 'uniform' | 'kernel'; singlePeerBlend?: boolean; centreEstimator?: CentreEstimator; model?: typeof MODEL; shrinkage?: { base: number; min: number; max: number }; factorWeight?: number; fitAmplitudes?: boolean; derivedUnknownAge?: boolean; dispersionShrinkage?: boolean; calibrationOptions?: CalibrationOptions; bandContinuity?: 'current' | 'threshold' | 'interpolate' } = {}) {
   const arm = (extra: { biasFactor?: number; bandMultipliers?: BandMultipliers } = {}) => backtest(snapshot, { factorShapes, sizeAdjustment, ...variants, ...extra });
   const uncorrected = arm();
   const correctionFactor = Math.exp(-median(uncorrected.map(row => row.logError)));
@@ -374,9 +386,11 @@ export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes
     category: (() => { const xs = corrected.filter(row => row.basis === 'category').map(row => -row.logError); return { r25: quantile(xs, .25), r75: quantile(xs, .75) }; })(),
     global_anchored: (() => { const xs = corrected.filter(row => row.basis !== 'category').map(row => -row.logError); return { r25: quantile(xs, .25), r75: quantile(xs, .75) }; })()
   };
+  // The residual band is [centre + m * r25, centre + m * r75] with r the quantiles of ln(realized / predicted), so its
+  // lower distance is -r25 and its upper distance is r75.
   const widthMultipliers: BandMultipliers = {
-    category: bestBandMultiplier(corrected.filter(row => row.basis === 'category').map(row => ({ ...row, lowLogDistance: residualQuantiles.category.r75, highLogDistance: -residualQuantiles.category.r25 }))),
-    global_anchored: bestBandMultiplier(corrected.filter(row => row.basis !== 'category').map(row => ({ ...row, lowLogDistance: residualQuantiles.global_anchored.r75, highLogDistance: -residualQuantiles.global_anchored.r25 })))
+    category: bestBandMultiplier(corrected.filter(row => row.basis === 'category').map(row => ({ ...row, lowLogDistance: -residualQuantiles.category.r25, highLogDistance: residualQuantiles.category.r75 }))),
+    global_anchored: bestBandMultiplier(corrected.filter(row => row.basis !== 'category').map(row => ({ ...row, lowLogDistance: -residualQuantiles.global_anchored.r25, highLogDistance: residualQuantiles.global_anchored.r75 })))
   };
   const final = corrected.map(row => {
     let categoryBasis = row.basis === 'category';
@@ -385,11 +399,21 @@ export function calibrateBacktest(snapshot: Snapshot, factorShapes: FactorShapes
     const r25 = residualQuantiles.global_anchored.r25 * (1 - blend) + residualQuantiles.category.r25 * blend;
     const r75 = residualQuantiles.global_anchored.r75 * (1 - blend) + residualQuantiles.category.r75 * blend;
     const m = categoryBasis ? widthMultipliers.category : widthMultipliers.global_anchored;
-    const lowLogDistance = r75; const highLogDistance = -r25;
-    const covered = row.logError >= -m * lowLogDistance && row.logError <= m * highLogDistance;
+    const lowLogDistance = -r25; const highLogDistance = r75;
+    const covered = withinBand(row.logError, lowLogDistance, highLogDistance, m);
     return { ...row, lowLogDistance, highLogDistance, covered, bandRatio: Math.exp(m * (r75 - r25)) };
   });
   return { correctionFactor, widthMultipliers, residualQuantiles, observations: final, summary: summarizeBacktest(final) };
+}
+
+/**
+ * Adoption gate for fitted factor amplitudes, on contest metrics of the two arms' LOO observations: the fitted arm must
+ * cut the overall median absolute log error by at least 3% and must not worsen either slug-ordered half by more than 1%.
+ */
+export function adoptFittedAmplitudes(fitted: ContestMetrics, base: ContestMetrics): boolean {
+  return fitted.overall.median_absolute_log_error <= .97 * base.overall.median_absolute_log_error
+    && fitted.first_half.median_absolute_log_error <= 1.01 * base.first_half.median_absolute_log_error
+    && fitted.second_half.median_absolute_log_error <= 1.01 * base.second_half.median_absolute_log_error;
 }
 
 export function factorChangeReport(snapshot: Snapshot, sizeAdjustment?: SizeAdjustment) {
@@ -397,7 +421,9 @@ export function factorChangeReport(snapshot: Snapshot, sizeAdjustment?: SizeAdju
   const metrics = (rows: BacktestObservation[]) => contestMetrics(rows);
   const base = arm(false, false);
   const fitted = arm(true, false);
-  const chooseFit = fitted.summary.all.median_absolute_log_error <= base.summary.all.median_absolute_log_error * .97 && fitted.summary.first_half.median_absolute_log_error <= base.summary.first_half.median_absolute_log_error * 1.01 && fitted.summary.second_half.median_absolute_log_error <= base.summary.second_half.median_absolute_log_error * 1.01;
+  // The halves live on contest metrics, not on calibrateBacktest's summary ({ all, by_basis } only).
+  const baseM = metrics(base.observations), fittedM = metrics(fitted.observations);
+  const chooseFit = adoptFittedAmplitudes(fittedM, baseM);
   const afterFit = chooseFit ? fitted : base;
   const unknown = arm(chooseFit, true);
   const chooseUnknown = unknown.summary.all.median_absolute_log_error <= afterFit.summary.all.median_absolute_log_error * 1.01;
@@ -407,7 +433,7 @@ export function factorChangeReport(snapshot: Snapshot, sizeAdjustment?: SizeAdju
   // fit was adopted and the derived unknown age was then adopted on top of it (the `unknown` arm). It was
   // previously always fitted at the full-sample derived unknown age, a setting no evaluated arm necessarily used.
   const amplitudes = evaluatedAmplitudes(snapshot, sizeAdjustment, { fitAmplitudes: true, derivedUnknownAge: chooseFit && chooseUnknown });
-  return { baseline: metrics(base.observations), fitted: metrics(fitted.observations), unknown_age: metrics(unknown.observations), adopted_amplitudes: chooseFit, adopted_unknown_age: chooseUnknown, selected: chooseUnknown ? unknown : afterFit, amplitudes, unknownAge: derivedUnknownAge(snapshot) };
+  return { baseline: baseM, fitted: fittedM, unknown_age: metrics(unknown.observations), adopted_amplitudes: chooseFit, adopted_unknown_age: chooseUnknown, selected: chooseUnknown ? unknown : afterFit, amplitudes, unknownAge: derivedUnknownAge(snapshot) };
 }
 
 export const GRADE_BAND_EDGES = [3, 10, 30, 100] as const;
@@ -467,29 +493,26 @@ function withinCategorySlope(snapshot: Snapshot): number {
   return denominator ? xs.reduce((sum, value, i) => sum + (value - mx) * (ys[i]! - my), 0) / denominator - 1 : 0;
 }
 
-function contestArm(snapshot: Snapshot, adjustment?: SizeAdjustment, variants: { peerWeighting?: 'uniform' | 'kernel'; singlePeerBlend?: boolean } = {}) {
-  const raw = backtest(snapshot, { sizeAdjustment: adjustment, ...variants });
-  const correctionFactor = Math.exp(-median(raw.map(row => row.logError)));
-  const corrected = backtest(snapshot, { sizeAdjustment: adjustment, ...variants, biasFactor: correctionFactor });
-  const widths = {
-    category: bestBandMultiplier(corrected.filter(row => row.basis === 'category')),
-    global_anchored: bestBandMultiplier(corrected.filter(row => row.basis !== 'category'))
-  };
-  return summarizeBacktest(backtest(snapshot, { sizeAdjustment: adjustment, ...variants, biasFactor: correctionFactor, bandMultipliers: widths }));
-}
-
-export function measurementReport(snapshot: Snapshot) {
+/**
+ * `variants` carries the factor settings the caller evaluates under (`runBacktest` passes the build's decisions), so the
+ * W/P contest arms differ from the reported model only in the one setting each contests. The default is the model
+ * default: fixed amplitudes and the fixed unknown age.
+ */
+export function measurementReport(snapshot: Snapshot, variants: { fitAmplitudes?: boolean; derivedUnknownAge?: boolean } = {}) {
   // withinCategorySlope already returns the log-ratio slope (log-mcap slope minus 1); do not subtract again.
   const categorySlope = withinCategorySlope(snapshot);
   const globalAdjustment = globalSizeAdjustment(snapshot);
-  const baseline = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope });
-  const weighted = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, { peerWeighting: 'kernel' });
-  const blended = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, { singlePeerBlend: true });
+  const baseline = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, variants);
+  const weighted = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, { ...variants, peerWeighting: 'kernel' });
+  const blended = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: globalAdjustment.slope }, { ...variants, singlePeerBlend: true });
   const proxyCategories = new Map<string, number>();
   for (const row of snapshot.protocols.filter(isLive)) proxyCategories.set(row.category ?? 'Other', (proxyCategories.get(row.category ?? 'Other') ?? 0) + 1);
   const proxySlugs = new Set(snapshot.protocols.filter(isLive).filter(row => proxyCategories.get(row.category ?? 'Other') === 2).map(row => row.slug));
-  const p0Rows = backtest(snapshot, { sizeAdjustment: { mode: 'global', slope: globalAdjustment.slope }, biasFactor: baseline.correctionFactor, bandMultipliers: baseline.widthMultipliers }).filter(row => proxySlugs.has(row.slug));
-  const p1Rows = backtest(snapshot, { sizeAdjustment: { mode: 'global', slope: globalAdjustment.slope }, singlePeerBlend: true, biasFactor: blended.correctionFactor, bandMultipliers: blended.widthMultipliers }).filter(row => proxySlugs.has(row.slug));
+  // Proxy rows are read from the calibrated arms' own observations, whose coverage is scored against the residual band
+  // production emits. They were previously re-run through backtest() with the residual-fit width multipliers applied to
+  // the peer-quartile band, a band no build emits.
+  const p0Rows = baseline.observations.filter(row => proxySlugs.has(row.slug));
+  const p1Rows = blended.observations.filter(row => proxySlugs.has(row.slug));
   return {
     global_ratio_slope: sizeAdjustmentSlope(snapshot),
     within_category_ratio_slope: categorySlope,

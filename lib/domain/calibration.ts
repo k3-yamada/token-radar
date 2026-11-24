@@ -1,4 +1,4 @@
-import type { Calibration, CalibrationEntry, CalibrationSet, Snapshot } from './types.ts';
+import type { Calibration, CalibrationEntry, CalibrationSet, Snapshot, StatisticsLabel } from './types.ts';
 import { median, quantile } from './statistics.ts';
 import { adjustLogRatio, estimateCentre, type CentreEstimator } from './estimate.ts';
 
@@ -39,6 +39,11 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
     }
   }
 
+  // The label states what each entry's statistics were computed from. Both sets are winsorized to the global
+  // percentile range; what differs is the size adjustment, applied to category logs whenever one is passed and to
+  // the global logs only under `adjustGlobal` (off in production).
+  const categoryLabel: StatisticsLabel = sizeAdjustment ? 'size-adjusted set statistics' : 'raw set statistics';
+  const globalLabel: StatisticsLabel = sizeAdjustment && options.adjustGlobal ? 'size-adjusted set statistics' : 'raw set statistics';
   const categories = new Map<string, CalibrationSet>();
   const entries: CalibrationEntry[] = [];
   for (const [category, xs] of groups) {
@@ -51,7 +56,7 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
       median_ratio: Math.exp(s.median),
       p25_ratio: Math.exp(s.q25),
       p75_ratio: Math.exp(s.q75),
-      statistics_label: 'raw set statistics',
+      statistics_label: categoryLabel,
       excluded_categories: [],
       peer_tokenized_count: s.count,
       peer_total_count: snapshot.protocols.filter(p => p.category === category).length
@@ -64,7 +69,7 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
     median_ratio: Math.exp(global.median),
     p25_ratio: Math.exp(global.q25),
     p75_ratio: Math.exp(global.q75),
-    statistics_label: 'raw set statistics',
+    statistics_label: globalLabel,
     excluded_categories: [...excluded],
     peer_tokenized_count: globalRows.length,
     peer_total_count: globalTotal

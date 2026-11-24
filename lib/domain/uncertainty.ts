@@ -20,8 +20,13 @@ function summarize(values: number[]): CalibrationSet {
   return { count: values.length, q25: quantile(values, .25), median: quantile(values, .5), q75: quantile(values, .75) };
 }
 
-/** Add reproducible rank intervals without changing any point estimate or point rank. */
-export function rankRanges(board: BoardRow[], calibration: Calibration, options: { sizeAdjustment?: { slope: number; center: number }; biasFactor?: number } = {}): void {
+/**
+ * Add reproducible rank intervals without changing any point estimate or point rank.
+ * `shrink` is the adopted Top-10 selection shrink: the slugs whose point values were rescaled and the multiplicative
+ * factor. It is applied to those slugs' resampled values in every iteration, so the intervals describe the same model
+ * as the point ranks. Absent (the shrink was not adopted) the resampling is unchanged.
+ */
+export function rankRanges(board: BoardRow[], calibration: Calibration, options: { sizeAdjustment?: { slope: number; center: number }; biasFactor?: number; shrink?: { slugs: ReadonlySet<string>; factor: number } } = {}): void {
   const random = mulberry32(SEED);
   const ranks = new Map(board.map(row => [row.slug, [] as number[]]));
   const keys = [...calibration.samples.keys()];
@@ -41,7 +46,9 @@ export function rankRanges(board: BoardRow[], calibration: Calibration, options:
       const adjustedCentre = options.sizeAdjustment
         ? adjustLogRatio(centre, Math.log(row.tvl_usd), options.sizeAdjustment.center, options.sizeAdjustment.slope)
         : centre;
-      const value = Math.max(1, Math.round(row.tvl_usd * Math.exp(adjustedCentre) * row.model.growth_multiplier * row.model.maturity_multiplier * (options.biasFactor ?? 1)));
+      const unshrunk = Math.max(1, Math.round(row.tvl_usd * Math.exp(adjustedCentre) * row.model.growth_multiplier * row.model.maturity_multiplier * (options.biasFactor ?? 1)));
+      // Same rounding as the point estimate in buildRadar: round, then scale, then round again with the $1 floor.
+      const value = options.shrink?.slugs.has(row.slug) ? Math.max(1, Math.round(unshrunk * options.shrink.factor)) : unshrunk;
       return { row, value };
     }).sort((a, b) => b.value - a.value || b.row.tvl_usd - a.row.tvl_usd || (a.row.slug < b.row.slug ? -1 : a.row.slug > b.row.slug ? 1 : 0));
     order.forEach((item, index) => ranks.get(item.row.slug)!.push(index + 1));

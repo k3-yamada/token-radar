@@ -1,9 +1,7 @@
 // radar-20 contests: corrected amplitude contest, per-basis bias contest, jackknife refit check.
-// Usage: node --experimental-strip-types tools/radar20-contests.mjs <snapshot.json>
+// Usage: node --experimental-strip-types tools/radar20-contests.mjs [snapshot.json]   (default: the kit snapshot)
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { parseSnapshot } from '../lib/infra/snapshot.ts';
+import { loadSnapshot } from './_snapshot.mjs';
 import { backtest, bestBandMultiplier, calibrateBacktest, derivedUnknownAge, fitFactorAmplitudes, globalSizeAdjustment } from '../lib/domain/backtest.ts';
 import { calibrate } from '../lib/domain/calibration.ts';
 import { buildBoard } from '../lib/domain/board.ts';
@@ -11,7 +9,7 @@ import { BASELINE_SHAPES } from '../lib/domain/estimate.ts';
 import { median, quantile } from '../lib/domain/statistics.ts';
 import { MODEL } from '../lib/domain/types.ts';
 
-const snapshot = parseSnapshot(readFileSync(resolve(process.argv[2] ?? '/input/snapshot.json'), 'utf8'));
+const snapshot = loadSnapshot();
 const isLive = p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0;
 const live = snapshot.protocols.filter(isLive);
 const without = slug => ({ ...snapshot, protocols: snapshot.protocols.filter(p => p.slug !== slug) });
@@ -71,7 +69,7 @@ const score = rows => {
   for (const key of ['category', 'global_anchored']) {
     const xs = rows.filter(r => basisKey(r) === key).map(r => -r.logError);
     const r25 = quantile(xs, .25), r75 = quantile(xs, .75);
-    const m = bestBandMultiplier(rows.filter(r => basisKey(r) === key).map(r => ({ ...r, lowLogDistance: r75, highLogDistance: -r25 })));
+    const m = bestBandMultiplier(rows.filter(r => basisKey(r) === key).map(r => ({ ...r, lowLogDistance: -r25, highLogDistance: r75 })));
     bands[key] = { r25, r75, m };
   }
   const covered = r => { const b = bands[basisKey(r)]; return r.logError >= -b.m * b.r75 && r.logError <= -b.m * b.r25; };

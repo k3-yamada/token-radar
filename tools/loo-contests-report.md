@@ -1,6 +1,8 @@
 # radar-19 leave-one-out contests
 
-Snapshot: `/home/hatch/workspace/makefun/token-radar-01-kit/input/snapshot.json` (128 live peers). Measurements from `node tools/loo-contests.mjs <snapshot.json>`; all calibration is repeated after leaving out each peer. No variant was adopted.
+Snapshot: `../token-radar-01-kit/input/snapshot.json`, relative to this repository's root (the sealed kit snapshot, 128 live peers; the default input of every tool in `tools/`). Measurements from `node --experimental-strip-types tools/loo-contests.mjs [snapshot.json]`; all calibration is repeated after leaving out each peer. No variant was adopted.
+
+The two tables directly below are the original radar-19 measurements, kept as recorded: they predate the radar-20 normalization fix and were run at the model-default unknown age (365 days), which is not the setting production uses. Current figures under production settings are in "Contests S and G re-run under production settings" below, which also explains how the radar-19 and radar-20 figures differ.
 
 ## Contest S: calibration basis consistency
 
@@ -21,9 +23,45 @@ Per-basis median log error / median absolute log error (S0 → S1): category `0.
 
 Point estimates and log errors are identical across G arms. Sparse rows have 2–4 remaining live category peers in the LOO calibration. G2's changed count is the number of category rows with `w < 1` whose band uses interpolated quantiles.
 
+## Contests S and G re-run under production settings (radar-20 follow-up fixes (9))
+
+`tools/loo-contests.mjs` now evaluates every arm under the factor decisions `buildRadar` takes (`productionVariants` in `tools/_snapshot.mjs`: fitted amplitudes and the snapshot-derived unknown age, each only when `factorChangeReport` adopts it). On the sealed snapshot that is amplitudes (1, 1) and the derived unknown age, 677 days, refit in every fold; before this batch the tool ran at the model-default 365 days.
+
+**The radar-19 versus radar-20 gap mixed two differences.** The baseline arm (S0 = G0) reads 1.23736 in the radar-19 tables above and 1.23777 as "Fixed (1, 1)" in the radar-20 tables below. That gap was never one effect:
+
+1. the backtest normalization fix (radar-20: amplitudes applied once, the fold's scored-row factor medians divided out), measured with the unknown age held at 365 days; and
+2. the unknown-age setting: the radar-19 tool ran at 365 days, `tools/radar20-contests.mjs` at the derived 677 days.
+
+Separated on the baseline arm (median absolute log error, 128 peers):
+
+| Measurement | Normalization | Unknown age | Median absolute log error | Step |
+|---|---|---|---:|---:|
+| radar-19 tables above | before the fix | 365 (default) | 1.23736 | |
+| This tool before this batch | radar-20 | 365 (default) | 1.2377683170 | +0.00041 (normalization) |
+| This tool now; equals the build's `calibration_backtest` | radar-20 | 677 (derived, per fold) | 1.2377682774 | −0.00000004 (age setting) |
+
+On this arm almost the whole gap is the normalization fix; the age setting moves the median absolute log error in the eighth decimal. The age setting is not negligible everywhere: it moves the mean absolute errors in the third decimal and the S1 category figure by 0.0027 (tables below). The first step cannot be reproduced from this tree (the pre-fix normalization is gone); it is the difference between the recorded radar-19 figure and the tool's output before this batch.
+
+Aligned figures (production settings; "was" is the same tool on the same tree at 365 days, immediately before the alignment):
+
+| Arm | Coverage | Median log error | Median absolute log error | Category MAE | Global-anchored MAE |
+|---|---:|---:|---:|---:|---:|
+| S0 current | 0.5000 | −0.000000010 | 1.23777 (was 1.23777) | 1.55943 (was 1.56087) | 1.74931 (was 1.74802) |
+| S1 adjusted global | 0.5000 | 0.000000020 | 1.33296 (was 1.33296) | 1.54942 (was 1.55085) | 1.75129 (was 1.75001) |
+
+Per-basis median log error / median absolute log error (S0 → S1): category `0.04777 / 1.20152` → `0.00000 / 1.19491` (S1 was `1.19225` at 365 days); global-anchored `−0.31519 / 1.34700` → `−0.15075 / 1.41649` (unchanged at this precision). MAE is mean absolute log error.
+
+| Arm | Overall coverage | Median log error | Median absolute log error | Sparse coverage (n=17) | Sparse mean band ratio | Rows with changed band basis |
+|---|---:|---:|---:|---:|---:|---:|
+| G0 current | 0.5000 | −0.000000010 | 1.23777 | 0.5294 | 11.6839 (was 11.7580) | 0 |
+| G1 w < 0.5 uses global anchored | 0.5078 | −0.000000010 | 1.23777 | 0.5882 | 13.8083 (was 13.8083) | 17 |
+| G2 quantiles interpolated by w | 0.4766 | −0.000000010 | 1.23777 | 0.5882 | 13.4078 (was 13.4323) | 100 |
+
+Verdicts are unchanged under production settings. Contest S: the adjusted global set still loses, 1.33296 against 1.23777. Contest G: both variants still move sparse-row coverage away from the 0.50 target (0.5882 against 0.5294) with wider bands. G2's overall coverage is 0.4766 here and 0.4844 in the radar-19 table; that difference is the normalization fix, not the age setting (the tool gave 0.4766 at 365 days as well).
+
 # radar-20 contests (corrected normalization)
 
-Same snapshot, 128 live peers. Measurements from `node --experimental-strip-types tools/radar20-contests.mjs <snapshot.json>` (about 3 minutes). All arms use the production settings: G2/M1 factors, full-sample size slope −0.5951 with the centre refit per fold, snapshot-derived unknown age refit per fold. LOO errors use the radar-20 normalization (amplitudes applied once, factor medians of the fold's scored rows divided out). Coverage is 0.5000 in every arm and basis because the per-basis band multiplier is searched to 50% on the same errors; it is reported for completeness and does not discriminate. No variant was adopted.
+Same snapshot, 128 live peers. Measurements from `node --experimental-strip-types tools/radar20-contests.mjs [snapshot.json]` (about 3 minutes). All arms use the production settings: G2/M1 factors, full-sample size slope −0.5951 with the centre refit per fold, snapshot-derived unknown age refit per fold. LOO errors use the radar-20 normalization (amplitudes applied once, factor medians of the fold's scored rows divided out). Coverage is 0.5000 in every arm and basis because the per-basis band multiplier is searched to 50% on the same errors; it is reported for completeness and does not discriminate. No variant was adopted.
 
 ## Amplitude contest
 

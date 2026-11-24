@@ -4,6 +4,14 @@
   var data = global.RADAR;
   var state = { query: '', category: 'all', chain: 'all', grade: 'all', watchlist: false, sort: 'rank', direction: 1, selected: null };
 
+  // First click on a column: magnitudes (TVL, implied value) start largest-first; text columns start A–Z; rank starts
+  // at 1, which is also largest-first by implied value. Clicking the active column again flips it.
+  var SORT_START = { rank: 1, name: 1, category: 1, tvl: -1, value: -1 };
+
+  function sortBy(key) {
+    return update({ sort: key, direction: state.sort === key ? -state.direction : (SORT_START[key] || 1) });
+  }
+
   function value(r) {
     return r.implied_value_usd;
   }
@@ -22,11 +30,12 @@
       var y = key === 'name' ? b.name : key === 'category' ? (b.category || '') : key === 'tvl' ? b.tvl_usd : key === 'value' ? value(b) : b.rank;
       return typeof x === 'string' ? x.localeCompare(y) * dir : (x - y) * dir;
     });
+    // The grade strip sits in the board results, beside the "N of M protocols" count, so it counts the filtered rows.
     var grades = { A: 0, B: 0, C: 0 };
-    data.rows.forEach(function (r) { grades[r.confidence] = (grades[r.confidence] || 0) + 1; });
+    rows.forEach(function (r) { grades[r.confidence] = (grades[r.confidence] || 0) + 1; });
     var peerCounts = {};
     data.calibration.forEach(function (x) { if (x.category !== 'global') peerCounts[x.category] = { tokenized: x.peer_tokenized_count, total: x.peer_total_count }; });
-    var shortlist = data.rows.filter(function (r) { return r.confidence !== 'C'; }).slice().sort(function (a, b) { return value(b) - value(a); }).slice(0, 5);
+    var shortlist = data.rows.filter(function (r) { return r.confidence !== 'C'; }).slice().sort(function (a, b) { return value(b) - value(a); }).slice(0, 6);
     return {
       data: data,
       rows: rows,
@@ -52,5 +61,5 @@
     return compute();
   }
 
-  global.RadarState = { getData: function () { return data; }, getState: function () { return state; }, compute: compute, update: update };
+  global.RadarState = { getData: function () { return data; }, getState: function () { return state; }, compute: compute, update: update, sortBy: sortBy };
 }(window));

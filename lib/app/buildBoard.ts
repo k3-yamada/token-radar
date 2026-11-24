@@ -34,8 +34,10 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
   // recorded metadata and the calibration backtest. When they are not adopted the key is absent and `estimate` keeps (1,1).
   const calibrationOptions = { biasFactor: modelCalibration.correctionFactor, bandMultipliers: modelCalibration.widthMultipliers, residualQuantiles: modelCalibration.residualQuantiles, sizeAdjustment, unknownAge, ...(adoptedAmplitudes ? { amplitudes: { growth: adoptedAmplitudes.growth, maturity: adoptedAmplitudes.maturity } } : {}) };
   const board = buildBoard(snapshot, MODEL, calibration, calibrationOptions);
+  let shrink: { slugs: Set<string>; factor: number } | undefined;
   if (shrinkAdopted) {
     const factor = Math.exp(-top10Bias);
+    shrink = { slugs: new Set(board.slice(0, 10).map(row => row.slug)), factor };
     for (const row of board.slice(0, 10)) {
       row.implied_value_usd = Math.max(1, Math.round(row.implied_value_usd * factor));
       row.value_low_usd = Math.min(row.implied_value_usd, Math.max(1, Math.round(row.value_low_usd * factor)));
@@ -45,7 +47,7 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
     board.sort((a, b) => b.implied_value_usd - a.implied_value_usd || b.tvl_usd - a.tvl_usd || a.slug.localeCompare(b.slug));
     board.forEach((row, index) => { row.rank = index + 1; });
   }
-  rankRanges(board, calibration, { sizeAdjustment, biasFactor: modelCalibration.correctionFactor });
+  rankRanges(board, calibration, { sizeAdjustment, biasFactor: modelCalibration.correctionFactor, ...(shrink ? { shrink } : {}) });
   const calibrationPeers = snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   const fullTop = new Set(board.slice(0, 20).map(r => r.slug));
   let overlapTotal = 0;

@@ -65,7 +65,7 @@ export const MODEL: ModelConstants = {
   live_rows: 24,
 };
 
-export const MODEL_VERSION = 'radar-12';
+export const MODEL_VERSION = 'radar-20';
 
 export interface FarmStep {
   text: string;
@@ -81,13 +81,16 @@ export interface CalibrationSet {
   q75: number;
 }
 
+/** What a calibration entry's median and quartiles were computed from: raw log ratios, or log ratios after the fitted TVL size adjustment. */
+export type StatisticsLabel = 'raw set statistics' | 'size-adjusted set statistics';
+
 export interface CalibrationEntry {
   category: string;
   live_count: number;
   median_ratio: number;
   p25_ratio: number;
   p75_ratio: number;
-  statistics_label: 'raw set statistics';
+  statistics_label: StatisticsLabel;
   excluded_categories: string[];
   peer_tokenized_count: number;
   peer_total_count: number;
@@ -195,6 +198,7 @@ export interface RadarData {
   early_size: number;
   live_size: number;
   scanned_size: number;
+  zero_tvl_excluded_from_scoring: number;
   rows: RadarRow[];
   live: LiveRow[];
   calibration: CalibrationEntry[];
