@@ -26,7 +26,8 @@
   }
 
   var html = document.documentElement, page, shortlistRegion, boardRegion, detailRegion, toTop;
-  var opener = null, openerRegion = null;
+  var opener = null, openerRegion = null, trail = [];
+  function slugOf(r) { return r.slug; }
 
   function mount() {
     var v = State.compute(), d = v.data;
@@ -58,8 +59,6 @@
     onScroll();
   }
 
-  // The board scrolls with the page (.table-wrap only scrolls sideways), so CSS sticky cannot pin the header:
-  // it is translated to the viewport top instead, stopping short of the last rows, and its tips open downward.
   function onScroll() {
     var t = boardRegion.querySelector('table'), h = t.tHead, b = t.getBoundingClientRect(), y = Math.max(0, Math.min(-b.top, b.height - h.offsetHeight - 160)), r = toTop.getBoundingClientRect(), w = boardRegion.getBoundingClientRect();
     h.style.transform = y ? 'translateY(' + y + 'px)' : '';
@@ -85,14 +84,35 @@
       scrim.className = 'scrim';
       scrim.dataset.close = '1';
       detailRegion.append(scrim, detail);
-      detail.querySelector('.close').focus();
+      step(0);
     }
+  }
+
+  function step(by) {
+    var i = trail.indexOf(State.getState().selected) + by, slug = trail[i], d = detailRegion.lastChild, f, b;
+    if (by) {
+      if (!slug) return;
+      b = document.activeElement.dataset.nav;
+      f = UI.detail(State.getData(), slug);
+      State.update({ selected: slug });
+      d.replaceChildren.apply(d, f.childNodes);
+      d.setAttribute('aria-label', f.getAttribute('aria-label'));
+      d.scrollTop = 0;
+      opener = boardRegion.querySelector('tr[data-slug="' + slug + '"]') || page.querySelector('[data-slug="' + slug + '"]') || opener;
+      openerRegion = opener.closest('[data-results]');
+    }
+    d.querySelector('[data-nav=prev]').disabled = i < 1;
+    d.querySelector('[data-nav=next]').disabled = i > trail.length - 2;
+    b = d.querySelector(b ? '[data-nav=' + b + ']' : '[data-close]');
+    (b.disabled ? d : b).focus();
   }
 
   function openDetail(source) {
     opener = source;
     openerRegion = source.closest('[data-results]');
-    State.update({ selected: source.dataset.slug });
+    var v = State.update({ selected: source.dataset.slug });
+    trail = v.rows.map(slugOf);
+    if (trail.indexOf(v.selected) < 0) trail = v.order.map(slugOf);
     renderDetail();
   }
 
@@ -142,6 +162,8 @@
       scrollTo(0, 0);
     } else if (close) {
       closeDetail();
+    } else if (e.target.dataset.nav) {
+      step(e.target.dataset.nav === 'next' ? 1 : -1);
     } else {
       var row = e.target.closest('[data-slug]');
       if (row) openDetail(row);
@@ -171,7 +193,12 @@
   });
 
   document.addEventListener('keydown', function (e) {
+    var by = { ArrowUp: -1, ArrowDown: 1 }[e.key];
     if (e.key === 'Escape') closeDetail();
+    else if (by && State.getState().selected) {
+      e.preventDefault();
+      step(by);
+    }
   });
 
   mount();

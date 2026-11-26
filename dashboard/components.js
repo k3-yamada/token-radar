@@ -22,6 +22,10 @@
     return /e/.test(s) ? plain(Number(s)) : s;
   }
 
+  var EST = ', from the unrounded figures. Not the calibration ratio used in the derivation.';
+
+  function estTvl(r) { return fixed3(r.implied_value_usd / r.tvl_usd); }
+
   function sig(n) {
     return fixed3(n).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
   }
@@ -238,7 +242,7 @@
     });
     summary.appendChild(tip(['A', 'B', 'C'].map(function (g) { return gradeMeaning(v.data, g); }).join(' '), true));
     var table = el('table'), head = el('thead'), tr = el('tr');
-    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['Tokenized peers', '', 'Share of category TVL held by protocols that record a token.'], ['Implied value', 'value', 'The whisker is the uncertainty band: the middle half of the model’s leave-one-out backtest errors for the row’s basis, widened to cover half of them.']].forEach(function (x, i) {
+    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['Tokenized peers', '', 'Share of category TVL held by protocols that record a token.'], ['Implied value', 'value', 'The whisker is the uncertainty band: the middle half of the model’s leave-one-out backtest errors for the row’s basis, widened to cover half of them.'], ['EST / TVL', 'est', 'Implied value divided by TVL' + EST]].forEach(function (x, i) {
       var th = el('th', 'c' + i), b = el(x[1] ? 'button' : 'span', '', x[0]);
       if (x[1]) {
         var on = v.sort === x[1];
@@ -247,8 +251,8 @@
         b.appendChild(el('span', on ? 'sort-marker' : 'sort-marker idle', on ? v.direction === 1 ? ' ↑' : ' ↓' : ' ↕')).setAttribute('aria-hidden', 'true');
       }
       th.appendChild(b);
-      if (x[2]) th.appendChild(tip(x[2], x[1] === 'value'));
-      if (i > 5) th.appendChild(el('small', 'scale-note', 'Bands, one log scale for all rows: ' + usd(scale.min) + '–' + usd(Math.pow(10, scale.logMin + scale.span))));
+      if (x[2]) th.appendChild(tip(x[2], i > 5));
+      if (i === 6) th.appendChild(el('small', 'scale-note', 'Bands, one log scale for all rows: ' + usd(scale.min) + '–' + usd(Math.pow(10, scale.logMin + scale.span))));
       tr.appendChild(th);
     });
     head.appendChild(tr);
@@ -273,12 +277,12 @@
       main.append(el('b', 'primary-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale));
       main.appendChild(grade(r.confidence, gradeMeaning(v.data, r.confidence) + ageLine(v.data, r)));
       val.appendChild(main);
-      row.append(rank, name, cat, chains, tvl, peers, val);
+      row.append(rank, name, cat, chains, tvl, peers, val, el('td', 'num', estTvl(r)));
       body.appendChild(row);
     });
     if (!v.rows.length) {
       var empty = el('tr'), cell = el('td', 'empty', 'No protocols match these filters.');
-      cell.colSpan = 7;
+      cell.colSpan = 8;
       empty.appendChild(cell);
       body.appendChild(empty);
     }
@@ -434,10 +438,10 @@
     var age = r.age_days == null ? 'listing date unknown, so the ' + d.derived_unknown_listed_age_days + '-day fallback age is used' : 'age used: ' + r.age_days + ' days, listed ' + r.listed_at;
     var rebuilt = r.tvl_usd * r.category_ratio_used * bias, shrunk = Math.abs(rebuilt / r.base_usd - 1) > .01;
     [
-      'TVL ' + usd(r.tvl_usd) + ' × ratio ' + r.category_ratio_used + ' × bias correction ' + bias.toFixed(3) + ' = base ' + usd(r.base_usd) + '. The ratio is the market-cap-to-TVL ratio from ' + basis + ', adjusted for this protocol’s size' + (shrunk ? '; the base also carries the selection shrink applied to the predicted top ' + d.selection_shrink.top_n : '') + '.',
-      'Base ' + usd(r.base_usd) + ' × growth multiplier ' + r.growth_multiplier + ' = ' + usd(afterGrowth) + '. 7-day TVL change: ' + (r.change_7d == null ? 'not reported, so the neutral midpoint is used' : r.change_7d + '%') + '.',
-      usd(afterGrowth) + ' × maturity multiplier ' + r.maturity_multiplier + ' = implied value ' + usd(r.implied_value_usd) + '. Maturity: ' + age + '.'
-    ].forEach(function (x) { list.appendChild(el('li', '', x)); });
+      ['TVL ' + usd(r.tvl_usd) + ' × ratio ' + r.category_ratio_used + ' × bias correction ' + bias.toFixed(3) + ' = base ' + usd(r.base_usd) + '.', 'The ratio is the market-cap-to-TVL ratio from ' + basis + ', adjusted for this protocol’s size' + (shrunk ? '; the base also carries the selection shrink applied to the predicted top ' + d.selection_shrink.top_n : '') + '.'],
+      ['Base ' + usd(r.base_usd) + ' × growth multiplier ' + r.growth_multiplier + ' = ' + usd(afterGrowth) + '.', '7-day TVL change: ' + (r.change_7d == null ? 'not reported, so the neutral midpoint is used' : r.change_7d + '%') + '.'],
+      [usd(afterGrowth) + ' × maturity multiplier ' + r.maturity_multiplier + ' = implied value ' + usd(r.implied_value_usd) + '.', 'Maturity: ' + age + '.']
+    ].forEach(function (x) { list.appendChild(el('li')).append(el('span', 'formula', x[0]), el('span', 'note', ' ' + x[1])); });
     wrap.append(el('h4', 'steps-label', 'Derivation'), list, el('p', 'peer-detail', 'Ratio and multipliers are shown rounded to four decimals; the base and the implied value are the model’s own stored figures.'));
     return wrap;
   }
@@ -445,16 +449,22 @@
   function detail(d, slug) {
     var r = d.rows.filter(function (x) { return x.slug === slug; })[0];
     if (!r) return null;
-    var s = el('section', 'detail'), close = el('button', 'close', 'Close detail');
+    var s = el('section', 'detail'), nav = el('div', 'nav'), close = el('button', '', 'Close detail');
     close.dataset.close = '1';
+    [['← Prev', 'prev', 'ArrowUp'], ['Next →', 'next', 'ArrowDown']].forEach(function (x) {
+      var b = nav.appendChild(el('button', '', x[0]));
+      b.dataset.nav = x[1];
+      b.setAttribute('aria-keyshortcuts', x[2]);
+    });
+    nav.appendChild(close);
     s.tabIndex = -1;
     s.setAttribute('role', 'dialog');
     s.setAttribute('aria-modal', 'true');
     s.setAttribute('aria-label', r.name);
-    s.append(close, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
+    s.append(nav, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
     s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' from ' + d.resample_count + ' calibration-set resamples, with growth and maturity factors held fixed'));
     var facts = el('div', 'facts');
-    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', fixed3(r.implied_value_usd / r.tvl_usd), 'This row’s implied value divided by its TVL, from the unrounded figures. Not the calibration ratio used in the derivation.'], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
+    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', estTvl(r), 'This row’s implied value divided by its TVL' + EST], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
     s.appendChild(facts);
     var take = el('div', 'what-takes');
     take.append(el('h3', '', 'What it takes'));

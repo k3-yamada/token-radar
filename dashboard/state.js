@@ -4,7 +4,7 @@
   var data = global.RADAR;
   var state = { query: '', category: 'all', chain: 'all', grade: 'all', watchlist: false, sort: 'rank', direction: 1, selected: null };
 
-  var SORT_START = { rank: 1, name: 1, category: 1, tvl: -1, value: -1 };
+  var SORT_START = { rank: 1, name: 1, category: 1, tvl: -1, value: -1, est: -1 };
 
   function sortBy(key) {
     return update({ sort: key, direction: state.sort === key ? -state.direction : SORT_START[key] });
@@ -22,16 +22,18 @@
     rows.forEach(function (r) { grades[r.confidence]++; });
     rows = rows.filter(function (r) { return state.grade === 'all' || r.confidence === state.grade; });
     var key = state.sort, dir = state.direction;
-    function pick(r) { return key === 'name' ? r.name : key === 'category' ? (r.category || '') : key === 'tvl' ? r.tvl_usd : key === 'value' ? r.implied_value_usd : r.rank; }
-    rows.sort(function (a, b) {
+    function pick(r) { return key === 'name' ? r.name : key === 'category' ? (r.category || '') : key === 'tvl' ? r.tvl_usd : key === 'value' ? r.implied_value_usd : key === 'est' ? r.implied_value_usd / r.tvl_usd : r.rank; }
+    function cmp(a, b) {
       var x = pick(a), y = pick(b);
       return typeof x === 'string' ? x.localeCompare(y) * dir : (x - y) * dir;
-    });
+    }
+    rows.sort(cmp);
     function byValue(a, b) { return b.implied_value_usd - a.implied_value_usd; }
     var shortlist = data.rows.filter(function (r) { return r.confidence !== 'C'; }).sort(byValue).slice(0, 6);
     return {
       data: data,
       rows: rows,
+      order: data.rows.slice().sort(cmp),
       top: data.rows.slice().sort(byValue).slice(0, 20),
       shortlist: shortlist,
       grades: grades,

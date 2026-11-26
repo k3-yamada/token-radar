@@ -1091,13 +1091,13 @@ test('audit strip, row age-band tooltip and farm economics render from data; no 
     assert.ok(audit.endsWith(`watchlist ${a.watchlist.present}/${a.watchlist.required}`), audit);
     const v = State.compute();
     const board = UI.board(v);
-    // No board column was added, and each row's tooltip ends with its own age band.
-    assert.equal(all(board, n => n.tagName === 'th').length, 7);
+    // Fix 31 added the eighth column (EST / TVL); no other column was added, and each row's tooltip ends with its own age band.
+    assert.equal(all(board, n => n.tagName === 'th').length, 8);
     const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
     assert.equal(rows.length, radar.rows.length);
     rows.forEach((tr, i) => {
       const r = v.rows[i]!, c = radar.launchContext.rows[r.slug];
-      assert.equal(tr.children.length, 7);
+      assert.equal(tr.children.length, 8);
       const tips = all(tr, hasClass('info-tip'));
       assert.equal(tips.length, 1);
       assert.ok(tips[0]!.dataset.tip!.endsWith(`\nAge band ${c.band}: ${(100 * c.share_with_token_record).toFixed(1)}% (n=${c.n}), share of protocols this age that record a token (cross-sectional share, not a launch probability; not used in the value or the rank).`), tips[0]!.dataset.tip);
@@ -1394,7 +1394,7 @@ test('every sortable header carries a marker from the live sort state; the detai
     assert.equal(mark, key === sort ? arrow : ' ↕', key);
     assert.equal(sortAttr, key === sort ? aria : '', key);
   });
-  assert.deepEqual(headers(State.compute()).map(h => h[0]), ['rank', 'name', 'category', '', 'tvl', '', 'value']);
+  assert.deepEqual(headers(State.compute()).map(h => h[0]), ['rank', 'name', 'category', '', 'tvl', '', 'value', 'est']);
   expect('rank', ' ↑', 'ascending');
   State.sortBy('tvl');
   expect('tvl', ' ↓', 'descending');
@@ -1408,4 +1408,68 @@ test('every sortable header carries a marker from the live sort state; the detai
     assert.equal(facts[i + 1], (r.implied_value_usd / r.tvl_usd).toPrecision(3));
     assert.ok(!facts.some(t => /Ratio source|peer ratio/i.test(t)), facts.join('|'));
   }
+});
+
+// ---- Dashboard (radar-21 fix 31) ----
+test('EST / TVL column matches the drawer fact on every row, sorts like the other magnitudes, and the derivation splits formula from prose', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar);
+    State.update({ sort: 'rank', direction: 1, grade: 'all' });
+    const board = UI.board(State.compute());
+    const th = all(board, n => n.tagName === 'th');
+    assert.equal(th[7]!.className, 'c7');
+    assert.ok(th[7]!.textContent.startsWith('EST / TVL'));
+    assert.match(all(th[7]!, hasClass('info-tip'))[0]!.dataset.tip!, /^Implied value divided by TVL, from the unrounded figures\. Not the calibration ratio used in the derivation\.$/);
+    const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
+    for (const tr of rows) {
+      const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug);
+      const facts = all(UI.detail(radar, r.slug), hasClass('facts'))[0]!.children.map(n => n.textContent);
+      const fact = facts[facts.findIndex(x => x.startsWith('Implied value ÷ TVL')) + 1];
+      assert.equal(tr.children[7]!.textContent, fact, r.slug);
+      assert.equal(fact, (r.implied_value_usd / r.tvl_usd).toPrecision(3), r.slug);
+    }
+    // First click sorts descending (like TVL and implied value), the second flips; aria-sort and the marker follow.
+    let v = State.sortBy('est');
+    assert.deepEqual([v.sort, v.direction], ['est', -1]);
+    const est = (x: DashRow) => x.implied_value_usd / x.tvl_usd;
+    assert.deepEqual(v.rows.map(est), v.rows.map(est).sort((a, b) => b - a));
+    const head = all(UI.board(v), n => n.tagName === 'th')[7]!;
+    assert.equal(head.attributes['aria-sort'], 'descending');
+    assert.equal(all(head, hasClass('sort-marker'))[0]!.textContent, ' ↓');
+    v = State.sortBy('est');
+    assert.deepEqual([v.sort, v.direction], ['est', 1]);
+    // The full board in the current order (the drawer's fallback trail) holds every row; the filtered rows are a subsequence of it.
+    v = State.update({ grade: v.rows[0]!.confidence });
+    assert.equal(v.order.length, radar.rows.length);
+    const order = v.order.map((x: DashRow) => x.slug);
+    let at = -1;
+    for (const x of v.rows) { const k = order.indexOf(x.slug); assert.ok(k > at, x.slug); at = k; }
+    State.update({ grade: 'all', sort: 'rank', direction: 1 });
+    // The empty state still spans the whole table.
+    const none = State.update({ query: 'no such protocol' }), emptyBoard = UI.board(none);
+    assert.equal(all(emptyBoard, hasClass('empty'))[0]!.colSpan, 8);
+    State.update({ query: '' });
+    for (const r of radar.rows.slice(0, 12) as DashRow[]) {
+      const detail = UI.detail(radar, r.slug);
+      // Prev / Next sit with the close button; app.js sets their disabled state from the trail.
+      const nav = all(detail, hasClass('nav'))[0]!;
+      assert.deepEqual(nav.children.map(n => [n.textContent, n.dataset.nav ?? n.dataset.close, n.attributes['aria-keyshortcuts'] ?? '']), [['← Prev', 'prev', 'ArrowUp'], ['Next →', 'next', 'ArrowDown'], ['Close detail', '1', '']]);
+      // Each step is two nodes built from the same values: the arithmetic through "= result." and the prose.
+      const steps = all(all(detail, hasClass('derivation'))[0]!, n => n.tagName === 'li');
+      const growth = UI.usd(r.base_usd * r.growth_multiplier);
+      assert.deepEqual(steps.map(li => li.children.map(c => c.className)), [['formula', 'note'], ['formula', 'note'], ['formula', 'note']]);
+      assert.deepEqual(steps.map(li => li.children[0]!.textContent), [
+        `TVL ${UI.usd(r.tvl_usd)} × ratio ${r.category_ratio_used} × bias correction ${radar.bias_correction_factor.toFixed(3)} = base ${UI.usd(r.base_usd)}.`,
+        `Base ${UI.usd(r.base_usd)} × growth multiplier ${r.growth_multiplier} = ${growth}.`,
+        `${growth} × maturity multiplier ${r.maturity_multiplier} = implied value ${UI.usd(r.implied_value_usd)}.`
+      ]);
+      const notes = steps.map(li => li.children[1]!.textContent);
+      assert.ok(notes[0]!.startsWith(' The ratio is the market-cap-to-TVL ratio from ') && notes[1]!.startsWith(' 7-day TVL change: ') && notes[2]!.startsWith(' Maturity: '), notes.join('|'));
+      assert.ok(notes.every(n => !n.includes(' = ')), notes.join('|'));
+    }
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  check(sealed);
 });
