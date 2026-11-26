@@ -25,15 +25,13 @@
     });
   }
 
-  var page, shortlistRegion, boardRegion, detailRegion;
-  // The element that opened the detail, and the region it lives in: a protocol can appear in both the shortlist and the board.
+  var html = document.documentElement, page, shortlistRegion, boardRegion, detailRegion, toTop;
   var opener = null, openerRegion = null;
 
   function mount() {
     var v = State.compute(), d = v.data;
     document.title += ' · ' + d.model_version;
     page = document.createElement('div');
-    // Entrance animations are scoped to .is-entering, which only the initial mount carries.
     page.className = 'page is-entering';
     shortlistRegion = document.createElement('div');
     shortlistRegion.dataset.results = 'shortlist';
@@ -41,34 +39,53 @@
     boardRegion = UI.board(v);
     detailRegion = document.createElement('div');
     detailRegion.dataset.results = 'detail';
-    // The picks beside the evidence (curve over validation tiles); one column when narrow.
     var region = document.createElement('div');
     region.className = 'first-region';
     region.append(shortlistRegion, UI.curve(v));
-    page.append(UI.header(d), region, boardRegion, detailRegion);
+    page.append(UI.header(d), region, boardRegion);
     page.append(UI.chart(v), UI.validation(d), UI.method(d), UI.live(d));
     var note = document.createElement('aside');
     note.className = 'est-note';
     note.textContent = 'Model estimates, not prices.';
-    // In the board's header row, so it never covers board data.
     boardRegion.querySelector('.section-head').appendChild(note);
-    root.replaceChildren(page);
+    toTop = document.createElement('button');
+    toTop.className = 'to-top';
+    toTop.type = 'button';
+    toTop.textContent = '↑ Top';
+    page.appendChild(toTop);
+    root.replaceChildren(page, detailRegion);
     countHeaderStats();
+    onScroll();
   }
 
-  // Rebuilds the board rows for a search, filter or sort change. UI.board already built them once for the initial mount.
+  // The board scrolls with the page (.table-wrap only scrolls sideways), so CSS sticky cannot pin the header:
+  // it is translated to the viewport top instead, stopping short of the last rows, and its tips open downward.
+  function onScroll() {
+    var t = boardRegion.querySelector('table'), h = t.tHead, b = t.getBoundingClientRect(), y = Math.max(0, Math.min(-b.top, b.height - h.offsetHeight - 160)), r = toTop.getBoundingClientRect(), w = boardRegion.getBoundingClientRect();
+    h.style.transform = y ? 'translateY(' + y + 'px)' : '';
+    h.classList.toggle('tips-down', b.top < 120);
+    toTop.hidden = scrollY < 1.5 * innerHeight || r.left < w.right && r.right > w.left && r.top < w.bottom && r.bottom > w.top;
+  }
+  addEventListener('scroll', onScroll);
+  addEventListener('resize', onScroll);
+
   function renderBoard() {
     page.classList.remove('is-entering');
     UI.updateBoardResults(boardRegion.querySelector('[data-results="board"]'), State.compute());
+    onScroll();
   }
 
-  // Opening and closing the detail leaves the board alone, so the opener element survives to take focus back.
   function renderDetail() {
-    var v = State.compute();
+    var v = State.compute(), detail = v.selected && UI.detail(v.data, v.selected), scrim = document.createElement('div');
     detailRegion.replaceChildren();
-    if (v.selected) {
-      var detail = UI.detail(v.data, v.selected);
-      if (detail) detailRegion.appendChild(detail);
+    page.inert = !!detail;
+    html.style.paddingRight = detail ? innerWidth - html.clientWidth + 'px' : '';
+    html.classList.toggle('locked', !!detail);
+    if (detail) {
+      scrim.className = 'scrim';
+      scrim.dataset.close = '1';
+      detailRegion.append(scrim, detail);
+      detail.querySelector('.close').focus();
     }
   }
 
@@ -77,8 +94,6 @@
     openerRegion = source.closest('[data-results]');
     State.update({ selected: source.dataset.slug });
     renderDetail();
-    var detail = detailRegion.querySelector('.detail');
-    if (detail) detail.scrollIntoView({ block: 'nearest' });
   }
 
   function closeDetail() {
@@ -86,8 +101,6 @@
     if (!slug) return;
     State.update({ selected: null });
     renderDetail();
-    // Back to the element that opened it. If the board was re-rendered meanwhile, the same protocol's row in the same
-    // region stands in. Focus that stays put (Escape) does not scroll.
     var target = opener && opener.isConnected ? opener : openerRegion && openerRegion.isConnected ? openerRegion.querySelector('[data-slug="' + slug + '"]') : null, b;
     if (target) {
       target.focus();
@@ -97,7 +110,6 @@
     opener = openerRegion = null;
   }
 
-  // One listener: text inputs, selects and checkboxes all fire 'input'.
   root.addEventListener('input', function (e) {
     var f = e.target.dataset.filter;
     if (f) {
@@ -109,15 +121,25 @@
   });
 
   root.addEventListener('click', function (e) {
-    // An info tip is its own control: interacting with it never sorts, opens or closes anything.
     if (e.target.closest('.info-tip')) return;
-    var sort = e.target.closest('[data-sort]'), close = e.target.closest('[data-close]');
-    if (sort) {
+    var sort = e.target.closest('[data-sort]'), close = e.target.closest('[data-close]'), g = e.target.closest('[data-grade]');
+    if (g) {
+      g = g.dataset.grade;
+      State.update({ grade: State.getState().grade === g ? 'all' : g });
+      root.querySelector('[data-filter=grade]').value = State.getState().grade;
+      renderBoard();
+      root.querySelector('[data-grade=' + g + ']').focus();
+    } else if (sort) {
       var key = sort.dataset.sort;
       State.sortBy(key);
       renderBoard();
       var sortedHeader = root.querySelector('[data-sort="' + key + '"]');
       if (sortedHeader) sortedHeader.focus();
+    } else if (e.target === toTop) {
+      var h1 = page.querySelector('h1');
+      h1.tabIndex = -1;
+      h1.focus();
+      scrollTo(0, 0);
     } else if (close) {
       closeDetail();
     } else {
@@ -127,21 +149,16 @@
   });
 
   root.addEventListener('keydown', function (e) {
-    // Only a focused board row needs this: shortlist cards are real buttons and activate natively, and a key pressed
-    // while a tip inside the row has focus belongs to the tip.
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-slug]')) {
       e.preventDefault();
       openDetail(e.target);
     }
   });
 
-  // Keeps a tip's bubble inside the page column. The bubble is laid out even while transparent, so its resting place
-  // (app.css: right edge on the marker) and every place set here must stay inside the page, or the document widens.
-  // Centred on the marker where that fits (.info-tip-right: ending at it), otherwise moved in by the shortfall.
   function placeTip(e) {
     var t = e.target.closest('.info-tip');
     if (!t) return;
-    var b = getComputedStyle(t, '::after'), p = getComputedStyle(page), box = page.getBoundingClientRect(), a = t.getBoundingClientRect();
+    var c = t.closest('.detail') || page, b = getComputedStyle(t, '::after'), p = getComputedStyle(c), box = c.getBoundingClientRect(), a = t.getBoundingClientRect();
     var w = ['width', 'paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce(function (sum, k) { return sum + parseFloat(b[k]); }, 0);
     var min = box.left + parseFloat(p.paddingLeft), max = box.right - parseFloat(p.paddingRight) - w;
     var x = t.classList.contains('info-tip-right') ? a.right - w : a.left + (a.width - w) / 2;
@@ -149,7 +166,6 @@
   }
   root.addEventListener('mouseover', placeTip);
   root.addEventListener('focusin', placeTip);
-  // A placement is only good for the width it was measured at.
   window.addEventListener('resize', function () {
     root.querySelectorAll('.info-tip[style]').forEach(function (t) { t.style.removeProperty('--tip-x'); });
   });

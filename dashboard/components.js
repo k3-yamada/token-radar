@@ -10,7 +10,6 @@
 
   function log10(x) { return Math.log(x) / Math.LN10; }
 
-  // A number in plain decimal notation, whatever its magnitude (String() switches to an exponent at 1e21 and below 1e-6).
   function plain(x) {
     var a = Math.abs(x);
     if (a >= 1e21) return (x < 0 ? '-' : '') + BigInt(a).toString();
@@ -18,7 +17,6 @@
     return x.toFixed(Math.min(100, 2 - Math.floor(log10(a))));
   }
 
-  // Three significant figures, never in exponential form: toPrecision(3) returns "1.00e+3" from 1000 up and below 1e-6.
   function fixed3(n) {
     var s = Number(n).toPrecision(3);
     return /e/.test(s) ? plain(Number(s)) : s;
@@ -32,7 +30,6 @@
 
   function usd(n) {
     if (n == null || !isFinite(n)) return '—';
-    // The unit is chosen on the rounded figure, so 999,500 prints as $1M rather than $1000K.
     var unit = 0;
     while (unit < USD_UNITS.length - 1 && Math.abs(Number((n / Math.pow(1000, unit)).toPrecision(3))) >= 1000) unit++;
     return '$' + sig(n / Math.pow(1000, unit)) + USD_UNITS[unit];
@@ -71,7 +68,6 @@
     return (100 * x).toFixed(1) + '%';
   }
 
-  // The row's age band from launchContext, as a second line of its tooltip. Context only: nothing in the model reads it.
   function ageLine(d, r) {
     var c = d.launchContext.rows[r.slug];
     return c ? '\nAge band ' + c.band + ': ' + pct(c.share_with_token_record) + ' (n=' + c.n + '), ' + LC_LABEL + '.' : '';
@@ -124,7 +120,6 @@
     range.style.width = Math.max(1, (end - start) / scale.span * 100) + '%';
     var marker = el('span', 'whisker-point');
     marker.style.left = Math.max(0, Math.min(100, (point - scale.logMin) / scale.span * 100)) + '%';
-    // Cards only: gridlines at $1M, $10M and $100M on the shared scale.
     if (facts) [6, 7, 8].forEach(function (e) {
       var at = (e - scale.logMin) / scale.span * 100;
       if (at >= 0 && at <= 100) track.appendChild(el('span', 'whisker-tick')).style.left = at + '%';
@@ -132,7 +127,6 @@
     track.appendChild(marker);
     track.appendChild(range);
     wrap.append(track);
-    // On a card, range and category/TVL are two spans: app.css breaks the line between them.
     var label = usd(low) + '–' + usd(high), text = wrap.appendChild(el('small', 'band-text', facts ? '' : label));
     if (facts) text.append(el('span', '', label), el('i', '', ' · '), el('span', '', facts));
     return wrap;
@@ -159,7 +153,6 @@
     title.append(el('div', 'eyebrow', 'TOKEN LAUNCH RADAR · ' + d.model_version.toUpperCase()), heading);
     var metrics = el('div', 'metrics');
     [[d.scanned_size, 'Protocols scanned'], [d.watchlist_size, 'Watchlist covered'], [d.board_size, 'Board rows']].forEach(function (x) { metric(metrics, x); });
-    // The full accounting of the snapshot, from data.js audit: every scanned protocol is tokenized, ranked or excluded for a stated reason.
     var a = d.audit;
     h.append(title, metrics, el('p', 'audit', a.total + ' scanned = ' + a.tokenized + ' tokenized + ' + a.pre_token + ' pre-token · ' + a.ranked_rows + ' ranked · ' + a.excluded_pre_token + ' excluded (' + a.excluded_pre_token_by_reason.map(function (x) { return x.count + ' ' + x.reason; }).join(', ') + ') · watchlist ' + a.watchlist.present + '/' + a.watchlist.required));
     return h;
@@ -190,7 +183,6 @@
 
   function shortlist(v) {
     var s = el('section', 'start-here');
-    // What the picks share, counted from the shortlist: grades, then categories.
     function tally(key) {
       var n = {};
       v.shortlist.forEach(function (r) { n[key(r)] = (n[key(r)] || 0) + 1; });
@@ -201,8 +193,6 @@
     var list = el('div', 'shortlist');
     var scale = valueScale(v.data.rows);
     v.shortlist.forEach(function (r) {
-      // The card is a plain container. Its name is the button, stretched over the whole card by CSS (.short-open::after),
-      // so the card stays fully clickable while the focusable grade tip is the button's sibling, never its descendant.
       var item = el('div', 'short-item'), open = el('button', 'short-name short-open', r.name);
       open.type = 'button';
       open.dataset.slug = r.slug;
@@ -226,8 +216,6 @@
   }
 
   function updateBoardResults(sectionEl, v) {
-    // The three parts persist across re-renders and only their contents are replaced: the count is the page's one
-    // live region, and a live region announces changes to a node that stays in the document.
     if (!sectionEl.children.length) {
       var liveCount = el('p', 'count');
       liveCount.setAttribute('role', 'status');
@@ -236,29 +224,31 @@
       sectionEl.append(el('div', 'grade-strip'), el('div', 'table-wrap'), liveCount);
     }
     var scale = valueScale(v.data.rows), picks = v.shortlist.map(function (r) { return r.slug; });
-    // Log-scale TVL bars, board minimum to maximum.
     var tvls = v.data.rows.map(function (r) { return r.tvl_usd; }), minTvl = Math.min.apply(null, tvls), tvlSpan = Math.log(Math.max.apply(null, tvls) / minTvl) || 1;
     var summary = sectionEl.children[0];
     summary.replaceChildren();
     ['A', 'B', 'C'].forEach(function (g) {
-      var item = el('span', v.grades[g] ? '' : 'zero', g + ' '), count = el('b', '', v.grades[g]);
-      item.appendChild(count);
+      var item = el('button', v.grades[g] ? '' : 'zero', g + ' ');
+      item.type = 'button';
+      item.dataset.grade = g;
+      item.setAttribute('aria-pressed', v.grade === g);
+      item.setAttribute('aria-label', 'Grade ' + g + ', ' + v.grades[g] + ' rows: filter');
+      item.appendChild(el('b', '', v.grades[g]));
       summary.appendChild(item);
     });
     summary.appendChild(tip(['A', 'B', 'C'].map(function (g) { return gradeMeaning(v.data, g); }).join(' '), true));
     var table = el('table'), head = el('thead'), tr = el('tr');
     [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['Tokenized peers', '', 'Share of category TVL held by protocols that record a token.'], ['Implied value', 'value', 'The whisker is the uncertainty band: the middle half of the model’s leave-one-out backtest errors for the row’s basis, widened to cover half of them.']].forEach(function (x, i) {
-      // Only sortable columns get a button; the others are plain labels.
       var th = el('th', 'c' + i), b = el(x[1] ? 'button' : 'span', '', x[0]);
       if (x[1]) {
+        var on = v.sort === x[1];
         b.dataset.sort = x[1];
-        if (v.sort === x[1]) {
-          th.setAttribute('aria-sort', v.direction === 1 ? 'ascending' : 'descending');
-          b.appendChild(el('span', 'sort-marker', v.direction === 1 ? ' ↑' : ' ↓'));
-        }
+        if (on) th.setAttribute('aria-sort', v.direction === 1 ? 'ascending' : 'descending');
+        b.appendChild(el('span', on ? 'sort-marker' : 'sort-marker idle', on ? v.direction === 1 ? ' ↑' : ' ↓' : ' ↕')).setAttribute('aria-hidden', 'true');
       }
       th.appendChild(b);
       if (x[2]) th.appendChild(tip(x[2], x[1] === 'value'));
+      if (i > 5) th.appendChild(el('small', 'scale-note', 'Bands, one log scale for all rows: ' + usd(scale.min) + '–' + usd(Math.pow(10, scale.logMin + scale.span))));
       tr.appendChild(th);
     });
     head.appendChild(tr);
@@ -277,7 +267,6 @@
       tvlFill.style.width = Math.log(r.tvl_usd / minTvl) / tvlSpan * 100 + '%';
       tvlBar.appendChild(tvlFill);
       tvl.appendChild(tvlBar);
-      // Rows that are also Start-here cards carry a second tag beside the watchlist one.
       var pick = picks.indexOf(r.slug) >= 0, tags = name.appendChild(r.watchlist || pick ? el('small', 'watch', r.watchlist ? 'WATCHLIST' : '') : el('span'));
       if (pick) tags.appendChild(el('span', 'short-tag', 'SHORTLIST'));
       var main = el('div', 'value-line');
@@ -299,12 +288,8 @@
     if (sectionEl.children[2].textContent !== countText) sectionEl.children[2].textContent = countText;
   }
 
-  // Implied value by rank for every board row: log y, the low–high band shaded behind the line, shortlist rows dotted.
-  // A grid, so no margin collapses: the gap above comes from Start here, the gap below from the board heading.
-  // The plot is an SVG stretched to the column (viewBox 0–100 both ways, strokes unscaled); the axis text is HTML over it.
   function curve(v) {
     var rows = v.data.rows.slice().sort(function (a, b) { return a.rank - b.rank; }), n = rows.length, s = el('section', 'curve'), c = s.appendChild(el('div')), vd = v.data.validation;
-    // Beside the plot: the four validation headlines in compact form, from the same items as the Validation section.
     if (vd) s.appendChild(el('div')).append(section('Validation', 'Out-of-sample checks, defined in the Validation section below.'), valTiles(vd, 2), valNote(vd));
     c.append(section('Value by rank', 'Implied value of all ' + n + ' board rows with each row’s low–high band shaded. Red dots mark the ' + v.shortlist.length + ' shortlist protocols.'));
     if (!n) return s;
@@ -333,7 +318,6 @@
       label.style.left = x(m - 1) + '%';
       label.style.transform = 'translateX(' + (i ? i === marks.length - 1 ? -100 : -50 : 0) + '%)';
     });
-    // Both captions sit inside the plot box so they cost no height: the y caption in the empty top-right corner, Rank at the origin.
     plot.append(el('span', 'curve-cap', 'Implied value · USD · log scale'), el('span', 'curve-cap curve-cap-x', 'Rank'));
     c.append(plot);
     return s;
@@ -342,14 +326,12 @@
   function chart(v) {
     var s = el('section', 'below chart');
     s.append(section('Top ' + v.top.length + ' by implied value', 'Bars reach the point estimate; whiskers show each low–high band.'));
-    // The scale spans the largest high of any row, like the board's whisker scale, so no band leaves its track.
     var list = el('div', 'bar-list'), max = v.top.reduce(function (m, r) { return Math.max(m, r.implied_value_usd, r.value_high_usd); }, 0) || 1;
     v.top.forEach(function (r) {
       var row = el('div', 'bar-row'), label = el('span', 'bar-name', r.name), track = el('span', 'bar-track'), point = el('span', 'bar-point'), range = el('span', 'bar-whisker');
       var left = Math.max(0, Math.min(99, r.value_low_usd / max * 100));
       point.style.width = Math.max(0, Math.min(100, r.implied_value_usd / max * 100)) + '%';
       range.style.left = left + '%';
-      // At least 1% wide so a narrow band stays visible; 'left' is capped at 99 so that minimum still fits.
       range.style.width = Math.min(100 - left, Math.max(1, (r.value_high_usd - r.value_low_usd) / max * 100)) + '%';
       track.append(point, range);
       row.append(label, track, el('span', 'num bar-value', usd(r.implied_value_usd)), grade(r.confidence, gradeMeaning(v.data, r.confidence)));
@@ -359,13 +341,10 @@
     return s;
   }
 
-  // Out-of-sample checks of the shipped model, every figure read from data.js validation and launchContext (computed by
-  // the build from the sealed snapshot). Error = median |ln(predicted / actual market cap)| over peers; factor = e^error.
   function factor(m) { return m.error_factor == null ? '—' : '×' + m.error_factor.toFixed(2); }
   function nominal(b) { return (100 * b.nominal_coverage).toFixed(0) + '%'; }
   function error(m) { return m.median_absolute_log_error == null ? '—' : m.median_absolute_log_error.toFixed(4); }
 
-  // The four headline tiles: value, label and definition; the first `parts` of them are rendered (2 = compact).
   function valTiles(v, parts) {
     var w = v.walkForward, bands = v.coverage.bands, tiles = el('div', 'vals');
     function held(b) { return nominal(b) + ' band held ' + pct(b.held_out.coverage) + ' (' + b.held_out.covered + '/' + b.held_out.count + ')'; }
@@ -381,7 +360,6 @@
     return tiles;
   }
 
-  // How to read the tiles; shown under both sets.
   function valNote(v) { return el('p', 'peer-detail', 'Smaller error is better; coverage is measured against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
 
   function validation(d) {
@@ -411,18 +389,13 @@
     var biasText = bias >= 0 ? 'The predicted top 10 ran high by a median ' + bias.toFixed(3) + ' log points' : 'The predicted top 10 ran low by a median ' + Math.abs(bias).toFixed(3) + ' log points';
     var bandRatios = d.rows.map(function(row) { return row.value_high_usd / row.value_low_usd; }).sort(function(a, b) { return a - b; });
     var boardMedianBandRatio = bandRatios.length % 2 ? bandRatios[(bandRatios.length - 1) / 2] : (bandRatios[bandRatios.length / 2 - 1] + bandRatios[bandRatios.length / 2]) / 2;
-    // The data carries only the age in use (model.unknown_listed_age_days is overwritten with it), so adoption is
-    // inferred against the model default; MODEL_DEFAULT_UNKNOWN_AGE_DAYS mirrors MODEL.unknown_listed_age_days (test-guarded).
     var unknownAgeSource = d.derived_unknown_listed_age_days === MODEL_DEFAULT_UNKNOWN_AGE_DAYS ? 'model default age' : 'snapshot median known age';
-    // Present only when the fitted amplitudes were adopted (the key is absent otherwise), so the sentence above stays complete.
     var amplitudeText = d.fitted_factor_amplitudes ? 'Before normalization each factor is raised to its fitted amplitude (growth ' + d.fitted_factor_amplitudes.growth + ', maturity ' + d.fitted_factor_amplitudes.maturity + '). ' : '';
-    // A grade with no backtest estimates has null coverage and error: print the count alone, never figures formatted from null.
     function gradeCarried(g, noun, errorLabel) {
       var metric = d.grade_backtest[g];
       if (!metric.count) return metric.count + noun;
       return metric.count + noun + ' with ' + pct(metric.coverage) + ' coverage and ×' + times(metric) + errorLabel;
     }
-    // A lead paragraph, then headed subsections. The node keeps the class method-copy; its text is the sentences below.
     var explanation = el('div', 'method-copy');
     [
       ['', ['The model is validated by leaving out each live protocol in turn and estimating it from the rest. The band is the middle half of the errors this model actually made in backtesting, per basis, widened just enough to cover half of them. In-sample band coverage is ' + pct(d.calibration_backtest.band_coverage) + ' by construction (' + pct(d.validation.coverage.bands[0].held_out.coverage) + ' held out); the median absolute log error is ' + error(d.validation.loo) + ' (factor ' + factor(d.validation.loo) + ').']],
@@ -452,7 +425,6 @@
     return s;
   }
 
-  // The implied value, step by step, from the row's own model fields.
   function derivation(d, r) {
     var wrap = el('div', 'derivation'), list = el('ol', 'steps');
     var basis = r.ratio_basis === 'category' ? 'the ' + r.category_ratio_source + ' set (' + r.ratio_live_count + ' live peers), shrunk toward the global set'
@@ -460,7 +432,6 @@
       : 'the global set, because the category has no live peers';
     var bias = d.bias_correction_factor, afterGrowth = r.base_usd * r.growth_multiplier;
     var age = r.age_days == null ? 'listing date unknown, so the ' + d.derived_unknown_listed_age_days + '-day fallback age is used' : 'age used: ' + r.age_days + ' days, listed ' + r.listed_at;
-    // If the stored base is not TVL × ratio × bias correction (a selection shrink rescales base and value together), say so.
     var rebuilt = r.tvl_usd * r.category_ratio_used * bias, shrunk = Math.abs(rebuilt / r.base_usd - 1) > .01;
     [
       'TVL ' + usd(r.tvl_usd) + ' × ratio ' + r.category_ratio_used + ' × bias correction ' + bias.toFixed(3) + ' = base ' + usd(r.base_usd) + '. The ratio is the market-cap-to-TVL ratio from ' + basis + ', adjusted for this protocol’s size' + (shrunk ? '; the base also carries the selection shrink applied to the predicted top ' + d.selection_shrink.top_n : '') + '.',
@@ -476,10 +447,14 @@
     if (!r) return null;
     var s = el('section', 'detail'), close = el('button', 'close', 'Close detail');
     close.dataset.close = '1';
+    s.tabIndex = -1;
+    s.setAttribute('role', 'dialog');
+    s.setAttribute('aria-modal', 'true');
+    s.setAttribute('aria-label', r.name);
     s.append(close, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
     s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' from ' + d.resample_count + ' calibration-set resamples, with growth and maturity factors held fixed'));
     var facts = el('div', 'facts');
-    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
+    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', fixed3(r.implied_value_usd / r.tvl_usd), 'This row’s implied value divided by its TVL, from the unrounded figures. Not the calibration ratio used in the derivation.'], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
     s.appendChild(facts);
     var take = el('div', 'what-takes');
     take.append(el('h3', '', 'What it takes'));
@@ -488,7 +463,6 @@
     [['Plan capital', usd(r.plan_capital_usd)], ['Time span', r.plan_weeks + ' weeks'], ['Step executions', fe.step_executions], ['Hours', fe.hours], ['Cost, gas + time', usd(fe.cost_usd_low) + '–' + usd(fe.cost_usd_high)]].forEach(function (x) { details.append(el('span', '', x[0]), el('b', '', x[1])); });
     take.appendChild(details);
     var share = d.calibration.filter(function (x) { return x.category === category(r); })[0];
-    // Two different measures, each named: a protocol count where the category has a calibration set, the TVL share otherwise.
     take.appendChild(el('p', 'peer-detail', share ? 'Tokenized peers, by protocol count: ' + share.peer_tokenized_count + ' of ' + share.peer_total_count + ' ' + category(r) + ' protocols record a token' : 'Tokenized peers, by TVL share (this category has no calibration set, so no protocol count): ' + pct(r.peer_token_share) + ' of ' + category(r) + ' TVL sits in protocols that record a token'));
     take.appendChild(el('p', 'peer-detail', 'Cost assumes gas $' + fa.gas_usd_per_step_low + '-$' + fa.gas_usd_per_step_high + ' per step, ' + fa.minutes_per_step + ' minutes per step and time at $' + fa.value_of_time_usd_per_hour + '/hour. These are assumptions, not snapshot data.'));
     s.appendChild(take);

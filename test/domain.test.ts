@@ -958,7 +958,7 @@ test('sorting starts magnitudes descending and text ascending, and flips on a re
   assert.deepEqual(State.compute().rows.map(r => r.rank), State.compute().rows.map((_, i) => i + 1));
 });
 
-test('grade strip counts the filtered rows it sits above, in a results region that persists', () => {
+test('grade strip counts the filtered rows by grade, ignoring only the grade filter its pills drive, in a results region that persists', () => {
   const radar = dashboardFixtureRadar();
   const { UI, State } = loadDashboard(radar);
   const count = (v: DashView) => { const c: Record<string, number> = { A: 0, B: 0, C: 0 }; v.rows.forEach(r => { c[r.confidence]++; }); return c; };
@@ -977,8 +977,18 @@ test('grade strip counts the filtered rows it sits above, in a results region th
   const grade = unfiltered.rows[0]!.confidence as string;
   const filtered = State.update({ grade });
   assert.ok(filtered.rows.length > 0 && filtered.rows.length <= radar.rows.length);
-  for (const g of ['A', 'B', 'C']) assert.equal(filtered.grades[g], g === grade ? filtered.rows.length : 0);
+  // radar-21 fix (29): the strip's pills drive the grade filter, so each count is what its pill would show: every other
+  // filter applies, the grade filter does not. The active grade's count is the board's row count.
+  assert.deepEqual({ ...filtered.grades }, { ...unfiltered.grades });
+  assert.equal(filtered.grades[grade], filtered.rows.length);
+  assert.equal(filtered.grade, grade);
   UI.updateBoardResults(results, filtered);
+  const pills = strip.children.filter(n => n.tagName === 'button');
+  assert.deepEqual(pills.map(n => n.dataset.grade), ['A', 'B', 'C']);
+  assert.deepEqual(pills.map(n => n.attributes['aria-pressed']), ['A', 'B', 'C'].map(g => String(g === grade)));
+  const watched = State.update({ watchlist: true });
+  assert.deepEqual({ ...watched.grades }, count(State.update({ grade: 'all' })));
+  State.update({ watchlist: false, grade });
   // Same three nodes, new contents.
   assert.deepEqual(results.children, [strip, wrap, live]);
   assert.equal(live.textContent, `${filtered.rows.length} of ${radar.rows.length} protocols`);
@@ -1369,4 +1379,33 @@ test('sealed snapshot: validation, launch context and audit are computed for the
   assert.equal(audit.watchlist.required, sealed.watchlist.length);
   assert.equal(audit.watchlist.present, audit.watchlist.required);
   for (const row of radar.rows) assert.ok(row.farm_economics.cost_usd_low < row.farm_economics.cost_usd_high && row.farm_economics.hours > 0);
+});
+
+// ---- Dashboard (radar-21 fix 30) ----
+test('every sortable header carries a marker from the live sort state; the detail shows implied value / TVL from the row', () => {
+  const radar = dashboardFixtureRadar();
+  const { UI, State } = loadDashboard(radar);
+  const headers = (v: DashView) => all(UI.board(v), n => n.tagName === 'th').map(th => {
+    const marks = all(th, hasClass('sort-marker'));
+    return [all(th, n => n.dataset.sort !== undefined)[0]?.dataset.sort ?? '', marks.map(m => m.textContent).join(''), th.attributes['aria-sort'] ?? ''];
+  });
+  const expect = (sort: string, arrow: string, aria: string) => headers(State.compute()).forEach(([key, mark, sortAttr]) => {
+    if (!key) return assert.equal(mark, '');
+    assert.equal(mark, key === sort ? arrow : ' ↕', key);
+    assert.equal(sortAttr, key === sort ? aria : '', key);
+  });
+  assert.deepEqual(headers(State.compute()).map(h => h[0]), ['rank', 'name', 'category', '', 'tvl', '', 'value']);
+  expect('rank', ' ↑', 'ascending');
+  State.sortBy('tvl');
+  expect('tvl', ' ↓', 'descending');
+  State.sortBy('name');
+  State.sortBy('name');
+  expect('name', ' ↓', 'descending');
+  for (const r of radar.rows.slice(0, 5)) {
+    const facts = all(UI.detail(radar, r.slug), hasClass('facts'))[0]!.children.map(n => n.textContent);
+    const i = facts.findIndex(t => t.startsWith('Implied value ÷ TVL'));
+    assert.ok(i >= 0, facts.join('|'));
+    assert.equal(facts[i + 1], (r.implied_value_usd / r.tvl_usd).toPrecision(3));
+    assert.ok(!facts.some(t => /Ratio source|peer ratio/i.test(t)), facts.join('|'));
+  }
 });
