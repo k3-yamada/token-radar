@@ -45,13 +45,13 @@ export function modelScript(figures: ReturnType<typeof modelFigures>, rows: numb
   // One line per category, [peers, median, IQR], so the fitted values stay readable.
   const lines = Object.entries(figures.categories).map(([c, v]) => `${JSON.stringify(c)}:${JSON.stringify(v)}`);
   const map = [
-    'Written by main.ts at build time. Evidence, by criterion:',
-    `Working radar: header(), board() in 2-views.js; watchlist ${watch.present} of ${watch.required}, ${rows} ranked rows.`,
-    `Value model: chain() and the constants below; derive() works rank 1; chain() gives all ${rows} board values exactly.`,
+    'Built by main.ts. Evidence, by criterion:',
+    `Working radar: header(), board(); watchlist ${watch.present} of ${watch.required}, ${rows} ranked rows.`,
+    `Value model: from the brief's three inputs, TVL × fitted peer ratio × 7-day growth × age with no token; chain(), constants below; derive() works rank 1; chain() gives all ${rows} board values exactly.`,
     `Accounting: ${audit.total} = ${audit.tokenized} tokenized (${audit.tokenized_calibration_peers} with a market cap calibrate; never ranked; live()) + ${audit.pre_token} pre-token = ${audit.ranked_rows} ranked + ${audit.excluded_pre_token} excluded; header().`,
-    'Farm plans: FARM, farmCost(); detail() shows the steps, hours and cost range.',
-    'Page: sorting and filters, state.js; drawer Prev / Next, app.js.',
-    'Validation: valTiles(), valLine(), validation() and the derive() tables.'
+    'Farm plans: FARM, farmCost(); per row in board(), steps in detail().',
+    'Page: sorting and filters, state.js; Prev / Next, app.js.',
+    'Validation: valTiles(), valLine(), validation().'
   ];
   return `${map.map(x => `// ${x}\n`).join('')}window.RADAR_MODEL=${JSON.stringify({ ...figures, categories: 0 }).replace('"categories":0', `"categories":{\n${lines.join(',\n')}}`)};\n`;
 }

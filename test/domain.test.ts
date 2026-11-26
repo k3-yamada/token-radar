@@ -836,7 +836,7 @@ const domNode = (tag: string): DomNode => {
     tagName: tag, className: '', children: [], dataset: {}, style: {}, attributes: {},
     get textContent() { return text + this.children.map(c => c.textContent).join(''); },
     set textContent(value: string) { text = String(value); this.children.length = 0; },
-    append(...c: DomNode[]) { this.children.push(...c); },
+    append(...c: (DomNode | string)[]) { this.children.push(...c.map(x => (typeof x === 'string' ? { ...domNode('#text'), textContent: x } : x))); },
     appendChild(c: DomNode) { this.children.push(c); return c; },
     replaceChildren(...c: DomNode[]) { this.children.splice(0, this.children.length, ...c); },
     setAttribute(name: string, value: string) { this.attributes[name] = String(value); }
@@ -1438,7 +1438,7 @@ test('every sortable header carries a marker from the live sort state; the detai
     assert.equal(mark, key === sort ? arrow : ' ↕', key);
     assert.equal(sortAttr, key === sort ? aria : '', key);
   });
-  assert.deepEqual(headers(State.compute()).map(h => h[0]), ['rank', 'name', 'category', '', 'tvl', '', 'value', 'est']);
+  assert.deepEqual(headers(State.compute()).map(h => h[0]), ['rank', 'name', 'category', '', 'tvl', '', 'value', '']);
   expect('rank', ' ↑', 'ascending');
   State.sortBy('tvl');
   expect('tvl', ' ↓', 'descending');
@@ -1455,33 +1455,36 @@ test('every sortable header carries a marker from the live sort state; the detai
 });
 
 // ---- Dashboard (radar-21 fix 31) ----
-test('EST / TVL column matches the drawer fact on every row, sorts like the other magnitudes, and the derivation splits formula from prose', t => {
+test('the farm plan column ties to each row\'s data and the drawer, EST / TVL is off the board but in the drawer, and the derivation splits formula from prose', t => {
   const check = (radar: Record<string, any>) => {
     const { UI, State } = loadDashboard(radar);
     State.update({ sort: 'rank', direction: 1, grade: 'all' });
     const board = UI.board(State.compute());
     const th = all(board, n => n.tagName === 'th');
     assert.equal(th[7]!.className, 'c7');
-    assert.ok(th[7]!.textContent.startsWith('EST / TVL'));
-    assert.match(all(th[7]!, hasClass('info-tip'))[0]!.dataset.tip!, /^Implied value divided by TVL, from the unrounded figures\. Not the calibration ratio used in the derivation\.$/);
+    // radar-21 fix (39): the farm plan replaces EST / TVL in the same position; unsortable, like 7d · age.
+    assert.ok(th[7]!.textContent.startsWith('Farm plan'));
+    assert.equal(all(th[7]!, n => n.dataset.sort !== undefined).length, 0);
+    assert.equal(all(th[7]!, hasClass('info-tip'))[0]!.dataset.tip, `Capital · weeks · cost, fees + time. Assumed: gas per chain, ${UI.farm.minutes} min per step, time $${UI.farm.hourly}/hour.`);
+    assert.deepEqual([UI.farm.minutes, UI.farm.hourly], [15, 30]);
+    assert.ok(th.every(h => !/EST\s*\/\s*TVL/i.test(h.textContent)), th.map(h => h.textContent).join('|'));
     const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
+    assert.equal(rows.length, radar.rows.length);
     for (const tr of rows) {
-      const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug);
-      const facts = all(UI.detail(radar, r.slug), hasClass('facts'))[0]!.children.map(n => n.textContent);
-      const fact = facts[facts.findIndex(x => x.startsWith('Implied value ÷ TVL')) + 1];
-      assert.equal(tr.children[7]!.textContent, fact, r.slug);
-      assert.equal(fact, (r.implied_value_usd / r.tvl_usd).toPrecision(3), r.slug);
+      const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug), cell = tr.children[7]!;
+      const detail = UI.detail(radar, r.slug), facts = all(all(detail, hasClass('what-takes'))[0]!, hasClass('facts'))[0]!.children.map(n => n.textContent);
+      const fact = (k: string) => facts[facts.indexOf(k) + 1];
+      // Two lines: capital · weeks, then the cost range; every figure from the row, the same farmCost() the drawer uses.
+      assert.deepEqual(cell.children.map(c => c.tagName), ['br', '#text'], r.slug);
+      const cost = cell.children[1]!.textContent, plan = cell.textContent.slice(0, cell.textContent.length - cost.length);
+      assert.equal(plan, `${UI.usd(r.plan_capital_usd)} · ${r.plan_weeks} wk`, r.slug);
+      assert.equal(cost, `${UI.usd(r.farm_economics.cost_usd_low)}–${UI.usd(r.farm_economics.cost_usd_high)}`, r.slug);
+      assert.deepEqual([UI.usd(r.plan_capital_usd), r.plan_weeks + ' weeks', cost], [fact('Plan capital'), fact('Time span'), fact('Cost, fees + time')], r.slug);
+      // The EST / TVL figure itself stays in the drawer.
+      const top = all(detail, hasClass('facts'))[0]!.children.map(n => n.textContent);
+      assert.equal(top[top.indexOf('Implied value ÷ TVL') + 1], (r.implied_value_usd / r.tvl_usd).toPrecision(3), r.slug);
     }
-    // First click sorts descending (like TVL and implied value), the second flips; aria-sort and the marker follow.
-    let v = State.sortBy('est');
-    assert.deepEqual([v.sort, v.direction], ['est', -1]);
-    const est = (x: DashRow) => x.implied_value_usd / x.tvl_usd;
-    assert.deepEqual(v.rows.map(est), v.rows.map(est).sort((a, b) => b - a));
-    const head = all(UI.board(v), n => n.tagName === 'th')[7]!;
-    assert.equal(head.attributes['aria-sort'], 'descending');
-    assert.equal(all(head, hasClass('sort-marker'))[0]!.textContent, ' ↓');
-    v = State.sortBy('est');
-    assert.deepEqual([v.sort, v.direction], ['est', 1]);
+    let v = State.sortBy('tvl');
     // The full board in the current order (the drawer's fallback trail) holds every row; the filtered rows are a subsequence of it.
     v = State.update({ grade: v.rows[0]!.confidence });
     assert.equal(v.order.length, radar.rows.length);
@@ -1521,7 +1524,7 @@ test('EST / TVL column matches the drawer fact on every row, sorts like the othe
 // ---- Dashboard (radar-21 fix 32) ----
 // Source-level checks; the rendered behaviour (one line per header, identical geometry with the drawer open) is browser-measured.
 test('board header cells do not wrap, and the open row is marked without layout properties from the selected slug', () => {
-  const css = readFileSync(new URL('../dashboard/app.css', import.meta.url), 'utf8'), app = readFileSync(new URL('../dashboard/app.js', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../dashboard/style.css', import.meta.url), 'utf8'), app = readFileSync(new URL('../dashboard/app.js', import.meta.url), 'utf8');
   const rule = (sel: string) => { const m = css.match(new RegExp('(?:^|[}\\n])' + sel.replace(/[.]/g, '\\.') + '\\{([^}]*)\\}')); assert.ok(m, sel); return m![1]!.split(';'); };
   // nowrap on the cell, so the label, the sort mark, the tip and the scale note share one line in every header.
   assert.ok(rule('.board th').includes('white-space:nowrap'));
@@ -1634,7 +1637,7 @@ test('the dashboard\'s farm rules reproduce lib\'s farm figures', t => {
   const check = (p: SnapshotProtocol, age: number | null) => {
     const steps = farmSteps(p, age), totals = farmTotals(p, age), mine = UI.farmCost(totals.weeks, p.chains[0]!), lib = farmEconomics(p, age);
     assert.equal(F.steps.length, steps.length);
-    assert.deepEqual(F.steps.map((x: [string, number]) => !!x[1]), steps.map(x => !!x.weekly));
+    assert.deepEqual(F.steps.map((x: number) => !!x), steps.map(x => !!x.weekly));
     assert.deepEqual([mine.runs, mine.hours, mine.fees, mine.low, mine.high], [stepExecutions(steps, totals.weeks), lib.hours, totals.fees, lib.cost_usd_low, lib.cost_usd_high]);
   };
   check(protocol(), 30);
@@ -1674,13 +1677,13 @@ test('the drawer\'s held-out strip carries the Validation tiles\' own figures', 
   check(dashboardFixtureRadar());
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed strip not checked');
-  assert.equal(check(sealed), 'Held out: median error factor (×1 = exact) leave-one-out ×3.45 (each peer priced without itself; strict ×3.74), walk-forward ×2.64 (earlier peers price later); peers inside 50% band 48.4%, 80% band 78.9%.');
+  assert.equal(check(sealed), 'Held out: median error factor (×1 = exact) leave-one-out ×3.45 (unclamped, each peer priced without itself; strict ×3.74), walk-forward ×2.64 (earlier peers price later); peers inside 50% band 48.4%, 80% band 78.9%.');
 });
 
 test('the dossier reads the constants and chain() first; the page still loads in dependency order', t => {
   const dir = new URL('../dashboard/', import.meta.url);
   const names = readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  assert.deepEqual(names, ['1-model.js', '2-views.js', 'app.css', 'app.js', 'index.html', 'state.js']);
+  assert.deepEqual(names, ['1-model.js', '2-views.js', 'app.js', 'index.html', 'state.js', 'style.css']);
   const html = readFileSync(new URL('index.html', dir), 'utf8');
   assert.deepEqual([...html.matchAll(/<script src="([^"]+)">/g)].map(m => m[1]), ['../data.js', '1-model.js', 'state.js', '2-views.js', 'app.js']);
   // In the views file the evidence comes first: the validation figures, chain(), derive() and the farm rules precede el().
@@ -1768,7 +1771,7 @@ test('the 7d · age column prints each row\'s own 7-day change and age, the draw
   assert.deepEqual(given.map((_, i) => seven.get(i)), ['0.0%', '0.0%', '0.0%', '0.0%', '-0.1%', '-10.0%', '2.4%']);
   assert.ok(!printed.some(c => c.startsWith('-0.0')));
   // The column keeps the fix (32) width budget: same fixed widths, one-line header cells.
-  const css = readFileSync(new URL('../dashboard/app.css', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../dashboard/style.css', import.meta.url), 'utf8');
   assert.ok(css.includes('.board table{table-layout:fixed;min-width:1181px}') && css.includes('.c5{width:140px}') && /\.board th\{[^}]*white-space:nowrap/.test(css));
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed column not checked');
@@ -1911,4 +1914,40 @@ test('fix 38 changed only the farm fields: every other field of board.json and d
   assert.equal(h(JSON.parse(readFileSync(boardPath, 'utf8')).rows.map(strip)), '2cec83b9f7ae261e3490275eb459fcde99d51ba0093bdc2e1900fdc20301ca63');
   const { farm_assumptions, model: { farm_plan_totals, ...model }, rows, ...rest } = JSON.parse(JSON.stringify(radar));
   assert.equal(h({ ...rest, model, rows: rows.map(strip) }), 'b966460c2e04a1ae111951ecd738f21f0eb8165abeab8f808a2f1c0513615fa5');
+});
+
+// ---- Dashboard (radar-21 fix 39): farm plan column, source order, brief-worded evidence ----
+test('the page h1 names the radar, not the watchlist, and the header stats render statically', () => {
+  const radar = dashboardFixtureRadar(), { UI } = loadDashboard(radar), head = UI.header(radar);
+  assert.deepEqual(all(head, n => n.tagName === 'h1').map(n => n.textContent), ['Pre-token radar']);
+  assert.deepEqual(all(head, hasClass('metric')).map(m => all(m, n => n.tagName === 'b')[0]!.textContent), [radar.scanned_size, radar.watchlist_size, radar.board_size].map(String));
+  const app = readFileSync(new URL('../dashboard/app.js', import.meta.url), 'utf8');
+  assert.ok(!app.includes('countHeaderStats') && !app.includes('requestAnimationFrame'));
+});
+
+test('the dossier text reads code before markup and CSS last: app.js precedes index.html, style.css ends it', t => {
+  const html = readFileSync(new URL('../dashboard/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('<link rel="stylesheet" href="style.css">') && !existsSync(new URL('../dashboard/app.css', import.meta.url)));
+  const dossier = new URL('../out/dossier.json', import.meta.url);
+  if (!existsSync(dossier)) return t.diagnostic('out/dossier.json not found: dossier order not checked');
+  const text: string = JSON.parse(readFileSync(dossier, 'utf8')).text, at = (f: string) => text.indexOf(`### ${f}\n`);
+  const order = ['1-model.js', '2-views.js', 'app.js', 'index.html', 'state.js', 'style.css'];
+  assert.ok(order.every((f, i) => at(f) > 0 && (i === 0 || at(order[i - 1]!) < at(f))), order.map(at).join(','));
+  assert.ok(at('app.js') < at('index.html') && [...text.matchAll(/^### (.+)$/gm)].pop()![1] === 'style.css');
+  assert.ok(text.indexOf('function chain(') < text.indexOf('function derive(') && text.indexOf('function derive(') < at('app.js'));
+  t.diagnostic(`offsets: ${order.map(f => `${f} ${Buffer.byteLength(text.slice(0, at(f)))}`).join(', ')}; chain() ${Buffer.byteLength(text.slice(0, text.indexOf('function chain(')))}, derive() ${Buffer.byteLength(text.slice(0, text.indexOf('function derive(')))}`);
+});
+
+test('the ablation note states that growth and age each lower the held-out error, with the computed figures, and keeps the tie', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI } = loadDashboard(radar), rows = radar.validation.ablation.rows, k = (key: string) => rows.find((r: any) => r.key === key);
+    const f = (r: any) => `×${r.error_factor.toFixed(2)} (${r.median_absolute_log_error.toFixed(4)})`;
+    const text = all(UI.validation(radar), hasClass('peer-detail')).map(n => n.textContent).find(x => x.startsWith('The 7-day growth'));
+    assert.equal(text, `The 7-day growth and age terms each lower the held-out error: without growth ${f(k('no_growth'))}, without maturity ${f(k('no_maturity'))}, full ${f(k('full'))}. A TVL-only curve ties the full model within noise but uses neither of them.`);
+    return text;
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed note not checked');
+  assert.ok(check(sealed)!.includes('without growth ×3.70 (1.3079), without maturity ×3.54 (1.2630), full ×3.45 (1.2378)'));
 });

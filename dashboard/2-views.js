@@ -9,7 +9,7 @@
     var w = v.walkForward, bands = v.coverage.bands, tiles = el('div', 'vals');
     function held(b) { return nominal(b) + ' band held ' + pct(b.held_out.coverage) + ' (' + b.held_out.covered + '/' + b.held_out.count + ')'; }
     [
-      [factor(v.loo), 'Leave-one-out · log error ' + error(v.loo), 'Median absolute log error over all ' + v.loo.count + ' tokenized peers with a market cap, each predicted without itself. Unclamped, no peer dropped.'],
+      [factor(v.loo), 'Leave-one-out · log error ' + error(v.loo), 'Median absolute log error over all ' + v.loo.count + ' tokenized peers with a market cap, unclamped, each predicted without itself; no peer dropped.'],
       [factor(v.loo.strict), 'Strict LOO · ' + error(v.loo.strict), 'The same, with the size slope and the bias correction refit in every fold.'],
       [factor(w), 'Walk-forward · ' + error(w), w.dated_peers + ' dated peers split at ' + w.split_date + ': fitted on the earlier ' + w.train_count + ', the later ' + w.test_count + ' predicted once.'],
       [pct(bands[0].held_out.coverage), 'Band coverage, held out', 'Nominal ' + held(bands[0]) + '; nominal ' + held(bands[1]) + ', against the other peers’ residual quantiles.']
@@ -20,10 +20,10 @@
     return tiles;
   }
 
-  function valNote(v) { return note('Smaller error is better; coverage is measured against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
+  function valNote(v) { return note('Over all ' + v.loo.count + ' tokenized peers with a market cap, unclamped; smaller error is better; coverage against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
 
   function valLine(v) {
-    return note('Held out: median error factor (×1 = exact) leave-one-out ' + factor(v.loo) + ' (each peer priced without itself; strict ' + factor(v.loo.strict) + '), walk-forward ' + factor(v.walkForward) + ' (earlier peers price later); peers inside ' + v.coverage.bands.map(function (b) { return nominal(b) + ' band ' + pct(b.held_out.coverage); }).join(', ') + '.');
+    return note('Held out: median error factor (×1 = exact) leave-one-out ' + factor(v.loo) + ' (unclamped, each peer priced without itself; strict ' + factor(v.loo.strict) + '), walk-forward ' + factor(v.walkForward) + ' (earlier peers price later); peers inside ' + v.coverage.bands.map(function (b) { return nominal(b) + ' band ' + pct(b.held_out.coverage); }).join(', ') + '.');
   }
 
   function f4(x) { return x.toFixed(4); }
@@ -65,10 +65,10 @@
     return pair;
   }
 
-  var FARM = { steps: [['open app', 0], ['check risks', 0], ['deposit', 0], ['weekly action', 1], ['engage once', 0], ['exit', 0]], gas: { Ethereum: [1, 8], Tron: [1, 10], Bitcoin: [.4, 5], 'Solana|Algorand|Stellar|Ripple|Aptos|Sui|Bittensor|Noble|XION|Provenance': [.001, .05], 'Proton|Qubic': [0, .01], other: [.01, .25] }, minutes: 15, hourly: 30 };
+  var FARM = { steps: [0, 0, 0, 1, 0, 0], gas: { Ethereum: [1, 8], Tron: [1, 10], Bitcoin: [.4, 5], 'Solana|Algorand|Stellar|Ripple|Aptos|Sui|Bittensor|Noble|XION|Provenance': [.001, .05], 'Proton|Qubic': [0, .01], other: [.01, .25] }, minutes: 15, hourly: 30 };
 
   function farmCost(weeks, chain) {
-    var g = FARM.gas.other, runs = FARM.steps.reduce(function (sum, x) { return sum + (x[1] ? weeks : 1); }, 0), hours = runs * FARM.minutes / 60, time = hours * FARM.hourly;
+    var g = FARM.gas.other, runs = FARM.steps.reduce(function (sum, x) { return sum + (x ? weeks : 1); }, 0), hours = runs * FARM.minutes / 60, time = hours * FARM.hourly;
     for (var k in FARM.gas) if (k.split('|').indexOf(chain) >= 0) g = FARM.gas[k];
     return { runs: runs, hours: hours, gas: g, fees: runs * (g[0] + g[1]) / 2, low: runs * g[0] + time, high: runs * g[1] + time };
   }
@@ -216,7 +216,7 @@
   function header(d) {
     var h = el('header', 'header'), title = el('div');
     var heading = el('div', 'title-line');
-    heading.append(el('h1', '', 'Pre-token watchlist'), tip('Select any row for its derivation and farm plan.'));
+    heading.append(el('h1', '', 'Pre-token radar'), tip('Select any row for its derivation and farm plan.'));
     title.append(el('div', 'eyebrow', 'TOKEN LAUNCH RADAR'), heading);
     var metrics = el('div', 'metrics');
     [[d.scanned_size, 'Protocols scanned'], [d.watchlist_size, 'Watchlist covered'], [d.board_size, 'Board rows']].forEach(function (x) { metric(metrics, x); });
@@ -301,7 +301,7 @@
     });
     summary.appendChild(tip(['A', 'B', 'C'].map(function (g) { return gradeMeaning(v.data, g); }).join(' '), true));
     var table = el('table'), head = el('thead'), tr = el('tr');
-    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['7d · age', '', 'Value inputs: 7-day TVL change, days since listed.'], ['Implied value', 'value', 'The whisker is the uncertainty band, defined under Model and calibration.'], ['EST / TVL', 'est', 'Implied value divided by TVL, from the unrounded figures. Not the calibration ratio used in the derivation.']].forEach(function (x, i) {
+    [['Rank', 'rank'], ['Protocol', 'name'], ['Category', 'category'], ['Chains', ''], ['TVL', 'tvl'], ['7d · age', '', 'Value inputs: 7-day TVL change, days since listed.'], ['Implied value', 'value', 'The whisker is the uncertainty band, defined under Model and calibration.'], ['Farm plan', '', 'Capital · weeks · cost, fees + time. Assumed: gas per chain, ' + FARM.minutes + ' min per step, time $' + FARM.hourly + '/hour.']].forEach(function (x, i) {
       var th = el('th', 'c' + i), b = el(x[1] ? 'button' : 'span', '', x[0]);
       if (x[1]) {
         var on = v.sort === x[1];
@@ -332,11 +332,12 @@
       tvl.appendChild(tvlBar);
       var pick = picks.indexOf(r.slug) >= 0, tags = name.appendChild(r.watchlist || pick ? el('small', 'watch', r.watchlist ? 'WATCHLIST' : '') : el('span'));
       if (pick) tags.appendChild(el('span', 'short-tag', 'SHORTLIST'));
-      var main = el('div', 'value-line');
+      var main = el('div', 'value-line'), fe = farmCost(r.plan_weeks, rowChains[0]), plan = el('td', 'plan', usd(r.plan_capital_usd) + ' · ' + r.plan_weeks + ' wk');
       main.append(el('b', 'primary-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale));
       main.appendChild(grade(v.data, r, ageLine(v.data, r)));
       val.appendChild(main);
-      row.append(rank, name, cat, chains, tvl, inp, val, el('td', 'num', estTvl(r)));
+      plan.append(el('br'), usd(fe.low) + '–' + usd(fe.high));
+      row.append(rank, name, cat, chains, tvl, inp, val, plan);
       body.appendChild(row);
     });
     if (!v.rows.length) {
@@ -405,11 +406,12 @@
   }
 
   function validation(d) {
-    var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div');
+    var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div'), a = {};
+    v.ablation.rows.forEach(function (r) { a[r.key] = factor(r) + ' (' + error(r) + ')'; });
     s.append(section('Validation', 'Computed at build time from the sealed snapshot, for the exact model the board ships.'));
     left.append(tableOf(['Ablation, same leave-one-out', 'Error', 'Factor', 'vs full'], v.ablation.rows.map(function (r) {
       return [r.label, error(r), factor(r), r.key === 'full' ? '—' : (r.delta_vs_full > 0 ? '+' : '−') + Math.abs(r.delta_vs_full).toFixed(4) + (r.beats_full ? ' · within noise' : '')];
-    }), 1), note('The size adjustment carries the model; growth and maturity help modestly; a plain curve is within noise.'));
+    }), 1), note('The 7-day growth and age terms each lower the held-out error: without growth ' + a.no_growth + ', without maturity ' + a.no_maturity + ', full ' + a.full + '. A TVL-only curve ties the full model within noise but uses neither of them.'));
     right.append(tableOf(['Listed age', 'Protocols', 'With token', 'Share'], d.launchContext.bands.map(function (b) {
       return [b.band, b.n, b.with_token_record, pct(b.share_with_token_record)];
     }), 1), note('Launch context: ' + LC_LABEL + '.'));
