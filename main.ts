@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildRadar } from './lib/app/buildBoard.ts';
@@ -68,8 +68,11 @@ function main(): void {
   emit(outputPath, board, radar);
   const dashboardNames = collectFlatFiles(join(ROOT, 'dashboard'), join(outputPath, 'dashboard'));
   // dashboard/1-model.js holds the fitted constants the dashboard's chain() recomputes values from; it is written from this
-  // build's own snapshot, over the committed copy, so the shipped page always matches the board beside it.
-  writeFileSync(join(outputPath, 'dashboard', '1-model.js'), modelScript(modelFigures(snapshot, board, radar), board.length, radar.audit));
+  // build's own snapshot and replaces the copied file atomically (temp file + rename, since the copy keeps a read-only
+  // source mode), so the shipped page always matches the board beside it.
+  const modelTemp = join(outputPath, 'dashboard', '.1-model.js.tmp');
+  writeFileSync(modelTemp, modelScript(modelFigures(snapshot, board, radar), board.length, radar.audit));
+  renameSync(modelTemp, join(outputPath, 'dashboard', '1-model.js'));
   const imageNames = collectFlatFiles(screenshotsSource, join(outputPath, 'screenshots'));
   writeFileSync(join(outputPath, 'dossier.json'), buildDossier(outputPath, { text_max_bytes: TEXT_LIMIT, screenshots: IMAGE_LIMITS, dashboard: { max_files: 400, max_bytes: 4194304 } }));
   process.stdout.write(`token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\ntoken radar: wrote ${join(outputPath, 'board.json')}, ${join(outputPath, 'data.js')}, ${join(outputPath, 'dashboard')} (${dashboardNames.length} files), ${join(outputPath, 'screenshots')} (${imageNames.length} images) and ${join(outputPath, 'dossier.json')}\n`);
