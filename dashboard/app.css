@@ -21,4 +21,4 @@ tbody tr[data-slug]{transition:background-color 120ms ease-out}
 @keyframes band-grow{from{transform:scaleX(0)}}
 @keyframes tick-in{from{opacity:0}}
 @keyframes drawer-in{from{transform:translateX(32px);opacity:0}}
-@keyframes row-in{from{opacity:0;transform:translateY(6px)}}
+@keyframes row-in{from{opacity:0;transform:translateY(6px)}}.derive th,.derive td{padding:4px 8px;font:11px/1.4 var(--mono)}

@@ -1,0 +1,46 @@
+import { calibrate } from './lib/domain/calibration.ts';
+import { globalSizeAdjustment } from './lib/domain/backtest.ts';
+import { ageDays, changePercentiles, growthFactor, maturityFactor } from './lib/domain/estimate.ts';
+import { interquartileRange, median } from './lib/domain/statistics.ts';
+import { MODEL, type BoardRow, type RadarData, type Snapshot } from './lib/domain/types.ts';
+
+/**
+ * The fitted constants of the value chain that data.js does not carry, computed with the same lib functions and inputs
+ * the build uses, so the dashboard's chain() can recompute a board value from them. Written to dashboard/model.js.
+ */
+export function modelFigures(snapshot: Snapshot, board: BoardRow[], radar: RadarData) {
+  const size = globalSizeAdjustment(snapshot);
+  const cal = calibrate(snapshot, size);
+  const percentiles = changePercentiles(snapshot.protocols);
+  const amp = [radar.fitted_factor_amplitudes?.growth ?? 1, radar.fitted_factor_amplitudes?.maturity ?? 1];
+  const bySlug = new Map(snapshot.protocols.map(p => [p.slug, p]));
+  const scored = board.map(r => bySlug.get(r.slug)!);
+  const growth = scored.map(p => Math.exp(amp[0]! * Math.log(growthFactor('G2', p.change_7d, 0, MODEL, percentiles.get(p.slug) ?? .5))));
+  const maturity = scored.map(p => Math.exp(amp[1]! * Math.log(maturityFactor('M1', ageDays(snapshot.as_of, p.listed_at), MODEL, radar.derived_unknown_listed_age_days))));
+  // Per board category: [peers, median, IQR] of the size-adjusted, winsorized log ratios (the IQR only from 4 peers up).
+  const categories: Record<string, number[]> = {};
+  for (const c of [...new Set(board.map(r => r.category))].sort()) {
+    const s = c ? cal.categories.get(c) : undefined;
+    if (s) categories[c!] = s.count < 4 ? [s.count, s.median] : [s.count, s.median, interquartileRange(cal.samples.get(c!)!)];
+  }
+  const top = board[0]!;
+  return {
+    size_center: size.center,
+    size_slope: size.slope,
+    global: [cal.global.count, cal.global.median, interquartileRange(cal.samples.get('global')!)],
+    k: [MODEL.shrinkage_k, 2, 24, 4],
+    growth: [MODEL.growth_weight, median(growth)],
+    maturity: [MODEL.maturity_min_factor, MODEL.maturity_range, MODEL.maturity_cap_days, median(maturity)],
+    amp,
+    bias: radar.bias_correction_factor,
+    unknown_age: radar.derived_unknown_listed_age_days,
+    example: { slug: top.slug, percentile: percentiles.get(top.slug) ?? .5 },
+    categories
+  };
+}
+
+export function modelScript(figures: ReturnType<typeof modelFigures>): string {
+  // One line per category, [peers, median, IQR], so the fitted values stay readable.
+  const lines = Object.entries(figures.categories).map(([c, v]) => `${JSON.stringify(c)}:${JSON.stringify(v)}`);
+  return `// Written by main.ts at build time.\nwindow.RADAR_MODEL=${JSON.stringify({ ...figures, categories: 0 }).replace('"categories":0', `"categories":{\n${lines.join(',\n')}}`)};\n`;
+}

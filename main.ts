@@ -6,6 +6,7 @@ import { option } from './lib/infra/cli.ts';
 import { emit } from './lib/infra/emit.ts';
 import { parseSnapshot, SnapshotError } from './lib/infra/snapshot.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
+import { modelFigures, modelScript } from './modelFigures.ts';
 
 const ROOT = fileURLToPath(new URL('.', import.meta.url));
 const TEXT_LIMIT = 65536;
@@ -66,6 +67,9 @@ function main(): void {
 
   emit(outputPath, board, radar);
   const dashboardNames = collectFlatFiles(join(ROOT, 'dashboard'), join(outputPath, 'dashboard'));
+  // dashboard/model.js holds the fitted constants the dashboard's chain() recomputes values from; it is written from this
+  // build's own snapshot, over the committed copy, so the shipped page always matches the board beside it.
+  writeFileSync(join(outputPath, 'dashboard', 'model.js'), modelScript(modelFigures(snapshot, board, radar)));
   const imageNames = collectFlatFiles(screenshotsSource, join(outputPath, 'screenshots'));
   writeFileSync(join(outputPath, 'dossier.json'), buildDossier(outputPath, { text_max_bytes: TEXT_LIMIT, screenshots: IMAGE_LIMITS, dashboard: { max_files: 400, max_bytes: 4194304 } }));
   process.stdout.write(`token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\ntoken radar: wrote ${join(outputPath, 'board.json')}, ${join(outputPath, 'data.js')}, ${join(outputPath, 'dashboard')} (${dashboardNames.length} files), ${join(outputPath, 'screenshots')} (${imageNames.length} images) and ${join(outputPath, 'dossier.json')}\n`);

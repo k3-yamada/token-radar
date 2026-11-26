@@ -66,6 +66,8 @@
 
   var LC_LABEL = 'share of protocols this age that record a token (cross-sectional share, not a launch probability; not used in the value or the rank)';
 
+  function note(text) { return el('p', 'peer-detail', text); }
+
   function category(r) { return r.category || 'Other'; }
 
   function pct(x) {
@@ -94,10 +96,6 @@
     var wrap = el('span', 'grade-wrap');
     wrap.append(el('span', 'grade grade-' + g.toLowerCase(), g), tip(explain));
     return wrap;
-  }
-
-  function ordinal(n) {
-    return n + (['st', 'nd', 'rd'][n % 1 || n % 100 > 10 && n % 100 < 14 ? 3 : n % 10 - 1] || 'th');
   }
 
   function needs(q, kind) {
@@ -359,12 +357,59 @@
       [pct(bands[0].held_out.coverage), 'Band coverage, held out (nominal\xa0' + nominal(bands[0]) + ')', 'Nominal ' + held(bands[0]) + '; nominal ' + held(bands[1]) + ', against the other peers’ residual quantiles.']
     ].forEach(function (x) {
       var m = metric(tiles, x);
-      if (parts > 2) m.append(el('p', 'peer-detail', x[2]));
+      if (parts > 2) m.append(note(x[2]));
     });
     return tiles;
   }
 
-  function valNote(v) { return el('p', 'peer-detail', 'Smaller error is better; coverage is measured against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
+  function valNote(v) { return note('Smaller error is better; coverage is measured against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
+
+  function f4(x) { return x.toFixed(4); }
+  function dollars(n) { return '$' + n.toLocaleString('en-US'); }
+
+  // The model's value chain, from model.js constants (M) and one row's inputs.
+  function chain(M, r, p) {
+    var c = M.categories[r.category] || [0], n = c[0], g = M.global, K = M.k, G = M.growth, T = M.maturity;
+    var raw = K[0] * c[2] / g[2], k = n < K[3] ? K[0] : Math.max(K[1], Math.min(K[2], raw)), w = n ? n / (n + k) : 0;
+    var centre = n ? w * c[1] + (1 - w) * g[1] : g[1], dx = Math.log(r.tvl_usd) - M.size_center, ln = centre + M.size_slope * dx;
+    var age = r.age_days == null ? M.unknown_age : r.age_days;
+    var gf = Math.exp(M.amp[0] * Math.log(1 + G[0] * (2 * p - 1))) / G[1];
+    var mf = Math.exp(M.amp[1] * Math.log(T[0] + T[1] * Math.log1p(Math.min(age, T[2])) / Math.log1p(T[2]))) / T[3];
+    return { c: c, raw: raw, k: k, w: w, centre: centre, dx: dx, ln: ln, age: age, g: gf, m: mf, value: Math.max(1, Math.round(r.tvl_usd * Math.exp(ln) * (gf * mf) * M.bias)) };
+  }
+
+  function derive(d, M) {
+    var g = M.global, K = M.k, G = M.growth, T = M.maturity, pair = el('div', 'pair derive');
+    var r = d.rows.filter(function (x) { return x.slug === M.example.slug; })[0], x = chain(M, r, M.example.percentile), c = x.c, n = c[0], few = n < K[3];
+    var rules = [
+      ['Peers', 'r = ln(mcap/TVL) - b(ln TVL - c), winsorised to global p' + d.winsor_percentiles.join('-p') + '; global set: raw ln(mcap/TVL)'],
+      ['Category', 'median m, IQR of r over n peers; global n ' + g[0] + ', m_g ' + f4(g[1]) + ', IQR_g ' + f4(g[2])],
+      ['Shrinkage', 'k = ' + K[0] + ' × IQR / IQR_g in [' + K[1] + ', ' + K[2] + '], ' + K[0] + ' if n < ' + K[3] + '; w = n/(n + k); centre = w × m + (1 - w) × m_g'],
+      ['Size', 'centre + b(ln TVL - c); global set: b ' + f4(M.size_slope) + ' = OLS slope of ln mcap on ln TVL - 1, c ' + f4(M.size_center) + ' = median ln TVL'],
+      ['Growth', 'g = (1 + ' + G[0] + '(2p - 1))^' + M.amp[0] + ' / ' + f4(G[1]) + ' (scored-row median); p = 7-day change percentile or 0.5'],
+      ['Maturity', 'm = (' + T[0] + ' + ' + T[1] + ' ln(1 + min(age, ' + T[2] + ')) / ln ' + (T[2] + 1) + ')^' + M.amp[1] + ' / ' + f4(T[3]) + ' (same); no date: ' + M.unknown_age + ' d'],
+      ['Value', 'TVL × e^size × g × m × ' + f4(M.bias) + ', bias correction e^-(median LOO log error)']
+    ];
+    var ex = [
+      ['Inputs', r.category + ' n ' + n + (n ? ', m ' + f4(c[1]) : '') + (few ? '' : ', IQR ' + f4(c[2])) + '; TVL ' + dollars(r.tvl_usd) + ', age ' + x.age + ' d, p ' + f4(M.example.percentile)],
+      ['k, w', 'k = ' + (few ? K[0] : K[0] + ' × ' + f4(c[2]) + ' / ' + f4(g[2]) + ' = ' + f4(x.raw) + (x.k === x.raw ? '' : ' → ' + x.k)) + ', w = ' + f4(x.w)],
+      ['Centre', n ? f4(x.w) + ' × ' + f4(c[1]) + ' + ' + f4(1 - x.w) + ' × ' + f4(g[1]) + ' = ' + f4(x.centre) : 'm_g ' + f4(x.centre)],
+      ['Size', f4(x.centre) + ' + ' + f4(M.size_slope) + ' × ' + f4(x.dx) + ' = ' + f4(x.ln)],
+      ['g, m', 'g ' + f4(x.g) + ', m ' + f4(x.m)],
+      ['Value', dollars(r.tvl_usd) + ' × e^' + f4(x.ln) + ' × ' + f4(x.g) + ' × ' + f4(x.m) + ' × ' + f4(M.bias) + ' = ' + dollars(x.value)],
+      ['Board', dollars(r.implied_value_usd) + (x.value === r.implied_value_usd ? ', equal' : ', differs')]
+    ];
+    pair.append(tableOf(['Derivation', 'Rule, fitted constants'], rules, 9), tableOf(['Rank 1: ' + r.name, 'chain(), shown to 4 dp'], ex, 9));
+    return pair;
+  }
+
+  // Farm rules every plan shares (lib farmplan); the step sentences are data.
+  var FARM = { steps: [['open app', 0], ['check risks', 0], ['deposit', 0], ['weekly action', 1], ['governance', 0], ['withdraw', 0]], gas: [1, 8], minutes: 15, hourly: 30 };
+
+  function farmCost(weeks) {
+    var runs = FARM.steps.reduce(function (sum, x) { return sum + (x[1] ? weeks : 1); }, 0), hours = runs * FARM.minutes / 60, time = hours * FARM.hourly;
+    return { runs: runs, hours: hours, fees: runs * (FARM.gas[0] + FARM.gas[1]) / 2, low: runs * FARM.gas[0] + time, high: runs * FARM.gas[1] + time };
+  }
 
   function validation(d) {
     var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div');
@@ -372,12 +417,13 @@
     var beats = v.ablation.rows.filter(function (r) { return r.beats_full; }).map(function (r) { return r.label + ' beats the full model by ' + (-r.delta_vs_full).toFixed(4) + '. '; }).join('');
     left.append(tableOf(['Ablation, same leave-one-out', 'Error', 'Factor', 'vs full'], v.ablation.rows.map(function (r) {
       return [r.label, error(r), factor(r), r.key === 'full' ? '—' : (r.delta_vs_full > 0 ? '+' : '−') + Math.abs(r.delta_vs_full).toFixed(4) + (r.beats_full ? ' · beats full model' : '')];
-    }), 1), el('p', 'peer-detail', beats + 'The size adjustment carries the model; growth and maturity help modestly; a plain curve is within noise.'));
+    }), 1), note(beats + 'The size adjustment carries the model; growth and maturity help modestly; a plain curve is within noise.'));
     right.append(tableOf(['Tokenless age', 'Protocols', 'With token', 'Share'], d.launchContext.bands.map(function (b) {
       return [b.band, b.n, b.with_token_record, pct(b.share_with_token_record)];
-    }), 1), el('p', 'peer-detail', 'Launch context: ' + LC_LABEL + '.'));
+    }), 1), note('Launch context: ' + LC_LABEL + '.'));
     pair.append(left, right);
     s.append(tiles, valNote(v), pair);
+    if (global.RADAR_MODEL) s.append(derive(d, global.RADAR_MODEL));
     return s;
   }
 
@@ -390,11 +436,10 @@
     var widths = d.band_width_multipliers;
     var basis = d.calibration_backtest.by_basis;
     var bias = d.selection_shrink.bias_log;
-    var biasText = bias >= 0 ? 'The predicted top 10 ran high by a median ' + bias.toFixed(3) + ' log points' : 'The predicted top 10 ran low by a median ' + Math.abs(bias).toFixed(3) + ' log points';
+    var biasText = 'The predicted top 10 ran ' + (bias >= 0 ? 'high' : 'low') + ' by a median ' + Math.abs(bias).toFixed(3) + ' log points';
     var bandRatios = d.rows.map(function(row) { return row.value_high_usd / row.value_low_usd; }).sort(function(a, b) { return a - b; });
     var boardMedianBandRatio = bandRatios.length % 2 ? bandRatios[(bandRatios.length - 1) / 2] : (bandRatios[bandRatios.length / 2 - 1] + bandRatios[bandRatios.length / 2]) / 2;
     var unknownAgeSource = d.derived_unknown_listed_age_days === MODEL_DEFAULT_UNKNOWN_AGE_DAYS ? 'model default age' : 'snapshot median known age';
-    var amplitudeText = d.fitted_factor_amplitudes ? 'Before normalization each factor is raised to its fitted amplitude (growth ' + d.fitted_factor_amplitudes.growth + ', maturity ' + d.fitted_factor_amplitudes.maturity + '). ' : '';
     function gradeCarried(g, noun, errorLabel) {
       var metric = d.grade_backtest[g];
       if (!metric.count) return metric.count + noun;
@@ -402,11 +447,10 @@
     }
     var explanation = el('div', 'method-copy');
     [
-      ['', ['The model is validated by leaving out each live protocol in turn and estimating it from the rest. The band is the middle half of the errors this model actually made in backtesting, per basis, widened just enough to cover half of them. In-sample band coverage is ' + pct(d.calibration_backtest.band_coverage) + ' by construction (' + pct(d.validation.coverage.bands[0].held_out.coverage) + ' held out); the median absolute log error is ' + error(d.validation.loo) + ' (factor ' + factor(d.validation.loo) + ').']],
-      ['Basis and centre', ['Large protocols are valued at a lower multiple of TVL, because that is what the issued protocols show; the measured global log-ratio slope is ' + d.size_adjustment_slope.toFixed(4) + '. The measured ' + (d.bias_correction_factor < 1 ? 'upward' : 'downward') + ' bias is corrected by a factor of ' + d.bias_correction_factor.toFixed(3) + '. Calibration uses the median of winsorized, globally size-adjusted log-ratios as its centre, with unweighted peer quartiles and dispersion-aware shrinkage toward the global set. The size adjustment is linear in log TVL; tested alternatives did not meet the adoption threshold.', 'Ratios are winsorized at the global ' + d.winsor_percentiles.map(ordinal).join(' and ') + ' percentiles so one extreme peer cannot dominate a category. A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '.']],
-      ['Growth, maturity and peer share', ['Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes receive the neutral midpoint. The growth factor (from that percentile) and the maturity factor (from log age) are normalized so their medians are 1. ' + amplitudeText + 'Missing listed_at ages use the ' + unknownAgeSource + ' (' + d.derived_unknown_listed_age_days + ' days). Peer share is weighted by TVL; detail shows the protocol count.']],
+      ['', ['Each live protocol is estimated from the rest. The band is the middle half of those errors per basis, widened just enough to cover half of them: in-sample coverage is ' + pct(d.calibration_backtest.band_coverage) + ' by construction (' + pct(d.validation.coverage.bands[0].held_out.coverage) + ' held out).']],
+      ['Basis and centre', ['Larger issued protocols trade at a lower multiple of TVL; alternatives to a linear size term did not meet the adoption threshold.', 'A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '.', 'Missing listed_at ages use the ' + unknownAgeSource + ' (' + d.derived_unknown_listed_age_days + ' days). Peer share is weighted by TVL; detail shows the protocol count.']],
       ['Bands and coverage', ['The board median band ratio is ' + boardMedianBandRatio.toFixed(2) + '×. Separate band multipliers are calibrated for category rows (' + widths.category.toFixed(2) + '×) and global-anchored rows (' + widths.global_anchored.toFixed(2) + '×). Category coverage is ' + pct(basis.category.band_coverage) + ' and global-anchored coverage is ' + pct(basis.global_anchored.band_coverage) + '.']],
-      ['Rank quality', ['The ' + d.calibration_backtest.peers_evaluated + ' leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + ' (median log error ' + bias.toFixed(3) + '); selection shrink ' + (d.selection_shrink.adopted ? 'was adopted' : 'was not adopted') + '.', 'Each rank carries a range from resampling the calibration ratios ' + d.resample_count + ' times. Wide ranges mark ranks the evidence cannot separate. Leaving out any single calibration peer keeps on average ' + pct(d.top20_jackknife_overlap) + ' of the top 20 in place.']],
+      ['Rank quality', ['The ' + d.calibration_backtest.peers_evaluated + ' leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + '; selection shrink ' + (d.selection_shrink.adopted ? 'was adopted' : 'was not adopted') + '.', 'Each rank carries a range from resampling the calibration ratios ' + d.resample_count + ' times. Wide ranges mark ranks the evidence cannot separate. Leaving out any single calibration peer keeps on average ' + pct(d.top20_jackknife_overlap) + ' of the top 20 in place.']],
       ['Grades', ['Grades are support-and-precision labels: A needs at least ' + needs(d.grade_rules.A, ' calibration') + '; B needs at least ' + needs(d.grade_rules.B, '') + '; all others are C. Measured error did not rise with band width alone in this snapshot, which is why peer support remains part of the grade.', 'In leave-one-out backtesting, A carried ' + gradeCarried('A', ' estimates', ' median error factor') + '; B carried ' + gradeCarried('B', '', ' error factor') + '; C carried ' + gradeCarried('C', '', ' error factor') + '.']]
     ].forEach(function (x) {
       if (x[0]) explanation.appendChild(el('h3', '', x[0]));
@@ -442,7 +486,7 @@
       ['Base ' + usd(r.base_usd) + ' × growth multiplier ' + r.growth_multiplier + ' = ' + usd(afterGrowth) + '.', '7-day TVL change: ' + (r.change_7d == null ? 'not reported, so the neutral midpoint is used' : r.change_7d + '%') + '.'],
       [usd(afterGrowth) + ' × maturity multiplier ' + r.maturity_multiplier + ' = implied value ' + usd(r.implied_value_usd) + '.', 'Maturity: ' + age + '.']
     ].forEach(function (x) { list.appendChild(el('li')).append(el('span', 'formula', x[0]), el('span', 'note', ' ' + x[1])); });
-    wrap.append(el('h4', 'steps-label', 'Derivation'), list, el('p', 'peer-detail', 'Ratio and multipliers are shown rounded to four decimals; the base and the implied value are the model’s own stored figures.'));
+    wrap.append(el('h4', 'steps-label', 'Derivation'), list, note('Ratio and multipliers are shown rounded to four decimals; the base and the implied value are the model’s own stored figures.'));
     return wrap;
   }
 
@@ -463,18 +507,18 @@
     s.setAttribute('aria-label', r.name);
     s.append(nav, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
     s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' from ' + d.resample_count + ' calibration-set resamples, with growth and maturity factors held fixed'));
-    var facts = el('div', 'facts');
-    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', estTvl(r), 'This row’s implied value divided by its TVL' + EST], ['7-day growth multiplier', r.growth_multiplier, 'Growth uses the protocol’s percentile rank among snapshot protocols reporting a 7-day change; missing changes get the neutral midpoint. Multipliers are normalized so their median is 1.'], ['Maturity multiplier', r.maturity_multiplier, 'Maturity grows with log age; multipliers are normalized so their medians are 1.']].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
+    var facts = el('div', 'facts'), norm = 'Median-normalized; formula under Validation.';
+    [['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', estTvl(r), 'This row’s implied value divided by its TVL' + EST], ['7-day growth multiplier', r.growth_multiplier, norm], ['Maturity multiplier', r.maturity_multiplier, norm]].forEach(function (x) { var label = el('span', '', x[0]); if (x[2]) label.appendChild(tip(x[2])); facts.append(label, el('b', '', x[1])); });
     s.appendChild(facts);
     var take = el('div', 'what-takes');
     take.append(el('h3', '', 'What it takes'));
     var details = el('div', 'facts');
-    var fe = r.farm_economics, fa = d.farm_assumptions;
-    [['Plan capital', usd(r.plan_capital_usd)], ['Time span', r.plan_weeks + ' weeks'], ['Step executions', fe.step_executions], ['Hours', fe.hours], ['Cost, gas + time', usd(fe.cost_usd_low) + '–' + usd(fe.cost_usd_high)]].forEach(function (x) { details.append(el('span', '', x[0]), el('b', '', x[1])); });
+    var fe = farmCost(r.plan_weeks);
+    [['Plan capital', usd(r.plan_capital_usd)], ['Time span', r.plan_weeks + ' weeks'], ['Step executions', fe.runs], ['Hours', fe.hours], ['Cost, gas + time', usd(fe.low) + '–' + usd(fe.high)]].forEach(function (x) { details.append(el('span', '', x[0]), el('b', '', x[1])); });
     take.appendChild(details);
     var share = d.calibration.filter(function (x) { return x.category === category(r); })[0];
-    take.appendChild(el('p', 'peer-detail', share ? 'Tokenized peers, by protocol count: ' + share.peer_tokenized_count + ' of ' + share.peer_total_count + ' ' + category(r) + ' protocols record a token' : 'Tokenized peers, by TVL share (this category has no calibration set, so no protocol count): ' + pct(r.peer_token_share) + ' of ' + category(r) + ' TVL sits in protocols that record a token'));
-    take.appendChild(el('p', 'peer-detail', 'Cost assumes gas $' + fa.gas_usd_per_step_low + '-$' + fa.gas_usd_per_step_high + ' per step, ' + fa.minutes_per_step + ' minutes per step and time at $' + fa.value_of_time_usd_per_hour + '/hour. These are assumptions, not snapshot data.'));
+    take.appendChild(note(share ? 'Tokenized peers, by protocol count: ' + share.peer_tokenized_count + ' of ' + share.peer_total_count + ' ' + category(r) + ' protocols record a token' : 'Tokenized peers, by TVL share (this category has no calibration set, so no protocol count): ' + pct(r.peer_token_share) + ' of ' + category(r) + ' TVL sits in protocols that record a token'));
+    take.appendChild(note('Cost assumes gas $' + FARM.gas[0] + '-$' + FARM.gas[1] + ' per step, ' + FARM.minutes + ' minutes per step and time at $' + FARM.hourly + '/hour. These are assumptions, not snapshot data.'));
     s.appendChild(take);
     var steps = el('ol', 'steps');
     r.farm_steps.forEach(function (x) { steps.appendChild(el('li', '', x)); });
@@ -482,5 +526,5 @@
     return s;
   }
 
-  global.RadarComponents = { header: header, shortlist: shortlist, board: board, updateBoardResults: updateBoardResults, curve: curve, chart: chart, validation: validation, method: method, live: live, detail: detail, usd: usd, ratio: ratio };
+  global.RadarComponents = { header: header, shortlist: shortlist, board: board, updateBoardResults: updateBoardResults, curve: curve, chart: chart, validation: validation, method: method, live: live, detail: detail, usd: usd, ratio: ratio, chain: chain, farm: FARM, farmCost: farmCost };
 }(window));
