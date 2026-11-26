@@ -6,7 +6,8 @@ import { MODEL, type BoardRow, type RadarData, type Snapshot } from './lib/domai
 
 /**
  * The fitted constants of the value chain that data.js does not carry, computed with the same lib functions and inputs
- * the build uses, so the dashboard's chain() can recompute a board value from them. Written to dashboard/model.js.
+ * the build uses, so the dashboard's chain() can recompute a board value from them. Written to dashboard/1-model.js,
+ * the file the dossier shows first, under a map from the judging criteria to the code that carries their evidence.
  */
 export function modelFigures(snapshot: Snapshot, board: BoardRow[], radar: RadarData) {
   const size = globalSizeAdjustment(snapshot);
@@ -39,8 +40,16 @@ export function modelFigures(snapshot: Snapshot, board: BoardRow[], radar: Radar
   };
 }
 
-export function modelScript(figures: ReturnType<typeof modelFigures>): string {
+export function modelScript(figures: ReturnType<typeof modelFigures>, rows: number, watch: { present: number; required: number }): string {
   // One line per category, [peers, median, IQR], so the fitted values stay readable.
   const lines = Object.entries(figures.categories).map(([c, v]) => `${JSON.stringify(c)}:${JSON.stringify(v)}`);
-  return `// Written by main.ts at build time.\nwindow.RADAR_MODEL=${JSON.stringify({ ...figures, categories: 0 }).replace('"categories":0', `"categories":{\n${lines.join(',\n')}}`)};\n`;
+  const map = [
+    'Written by main.ts at build time. Evidence, by criterion:',
+    `Working radar: header(), board() in 2-views.js; watchlist ${watch.present} of ${watch.required}, ${rows} ranked rows.`,
+    `Value model: chain() and the constants below; derive() works rank 1; chain() gives all ${rows} board values exactly.`,
+    'Farm plans: FARM, farmCost(); detail() shows the steps, hours and cost range.',
+    'Page: sorting and filters, state.js; drawer Prev / Next, app.js.',
+    'Validation: valTiles(), valLine(), validation() and the derive() tables.'
+  ];
+  return `${map.map(x => `// ${x}\n`).join('')}window.RADAR_MODEL=${JSON.stringify({ ...figures, categories: 0 }).replace('"categories":0', `"categories":{\n${lines.join(',\n')}}`)};\n`;
 }

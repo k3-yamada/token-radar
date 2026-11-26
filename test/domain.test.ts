@@ -710,7 +710,7 @@ test('factor_normalization describes the unknown age and amplitudes actually in 
 });
 
 test('dashboard method text names the unknown-age source truthfully, adopted or not', () => {
-  const source = readFileSync(new URL('../dashboard/components.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../dashboard/2-views.js', import.meta.url), 'utf8');
   // The dashboard's copy of the model default must track MODEL, or the wording branch silently goes wrong.
   assert.equal(Number(/MODEL_DEFAULT_UNKNOWN_AGE_DAYS = (\d+);/.exec(source)![1]), MODEL.unknown_listed_age_days);
   type StubNode = { className?: string; textContent?: string; children: StubNode[] };
@@ -729,7 +729,7 @@ test('dashboard method text names the unknown-age source truthfully, adopted or 
   assert.ok(rejected.includes(`Missing listed_at ages use the model default age (${MODEL.unknown_listed_age_days} days).`));
   assert.ok(!rejected.includes('median known age'));
   assert.ok(!rejected.includes('fitted amplitude'));
-  // Adopted amplitudes are named by the Validation derivation, which reads them from model.js, as each factor's exponent.
+  // Adopted amplitudes are named by the Validation derivation, which reads them from 1-model.js, as each factor's exponent.
   const fitted = buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: true, adopted_unknown_age: false, amplitudes: { growth: 2, maturity: 3, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } });
   const figures = modelFigures(snap, fitted.board, fitted.radar);
   assert.deepEqual(figures.amp, [2, 3]);
@@ -815,7 +815,7 @@ test('backtest coverage is scored against the band estimate() emits', () => {
 });
 
 // ---- Dashboard (radar-20 follow-up fixes, batch 7) ----
-// A minimal DOM: enough for components.js to build its trees so their structure can be asserted without a browser.
+// A minimal DOM: enough for 2-views.js to build its trees so their structure can be asserted without a browser.
 type DomNode = { tagName: string; className: string; textContent: string; children: DomNode[]; dataset: Record<string, string>; style: Record<string, string>; attributes: Record<string, string>; tabIndex?: number; [key: string]: unknown };
 const domNode = (tag: string): DomNode => {
   let text = '';
@@ -840,7 +840,7 @@ type Dashboard = {
 };
 const loadDashboard = (radar: unknown, model?: unknown): Dashboard => {
   const window: Record<string, any> = { RADAR: radar, RADAR_MODEL: model };
-  for (const file of ['state.js', 'components.js']) runInNewContext(readFileSync(new URL(`../dashboard/${file}`, import.meta.url), 'utf8'), { window, document: { createElement: domNode } });
+  for (const file of ['state.js', '2-views.js']) runInNewContext(readFileSync(new URL(`../dashboard/${file}`, import.meta.url), 'utf8'), { window, document: { createElement: domNode } });
   return { UI: window.RadarComponents, State: window.RadarState };
 };
 // out/data.js is the build output for the sealed snapshot; it is not vendored, so tests on it skip where it is absent.
@@ -1022,7 +1022,7 @@ test('detail shows the derivation step by step and labels which peer measure it 
       assert.ok(Math.abs(r.base_usd * r.growth_multiplier * r.maturity_multiplier / r.implied_value_usd - 1) < .01);
       assert.ok(!steps[0]!.includes('selection shrink'));
       assert.equal(all(detail, n => n.tagName === 'li').length, 3 + r.farm_steps.length);
-      const peers = all(detail, hasClass('peer-detail'))[0]!.textContent;
+      const peers = all(all(detail, hasClass('what-takes'))[0]!, hasClass('peer-detail'))[0]!.textContent;
       assert.ok(peers.startsWith(calibrated.has(r.category || 'Other') ? 'Tokenized peers, by protocol count: ' : 'Tokenized peers, by TVL share '), peers);
     }
   };
@@ -1120,7 +1120,7 @@ test('audit strip, row age-band tooltip and farm economics render from data; no 
       // Fix 24: one cost answer; the plan-fee midpoint and the cost share of implied value are no longer shown.
       assert.ok(!facts.includes('Plan fees') && !facts.includes('Cost / implied value'), facts.join('|'));
       const text = detail.textContent;
-      assert.ok(text.includes(`Cost assumes gas $${fa.gas_usd_per_step_low}-$${fa.gas_usd_per_step_high} per step, ${fa.minutes_per_step} minutes per step and time at $${fa.value_of_time_usd_per_hour}/hour. These are assumptions, not snapshot data.`));
+      assert.ok(text.includes(`Assumed, not snapshot data: gas $${fa.gas_usd_per_step_low}-$${fa.gas_usd_per_step_high} and ${fa.minutes_per_step} minutes per step, time at $${fa.value_of_time_usd_per_hour}/hour.`));
       assert.ok(!/break.even|pro rata/i.test(text));
     }
   };
@@ -1497,20 +1497,20 @@ test('board header cells do not wrap, and the open row is marked without layout 
 });
 
 // ---- Dashboard (radar-21 fix 34): the value model's derivation inside the dashboard source ----
-// dashboard/model.js as committed: the constants the dashboard's chain() reads.
+// dashboard/1-model.js as committed: the constants the dashboard's chain() reads.
 const committedModel = (): Record<string, any> => {
   const window: Record<string, any> = {};
-  runInNewContext(readFileSync(new URL('../dashboard/model.js', import.meta.url), 'utf8'), { window });
+  runInNewContext(readFileSync(new URL('../dashboard/1-model.js', import.meta.url), 'utf8'), { window });
   return JSON.parse(JSON.stringify(window.RADAR_MODEL));
 };
 
-test('sealed snapshot: dashboard/model.js is the build\'s own emit, and each constant is the model\'s value', t => {
+test('sealed snapshot: dashboard/1-model.js is the build\'s own emit, and each constant is the model\'s value', t => {
   const snap = sealedSnapshot(), radar = sealedRadar();
   if (!snap || !radar) return t.skip('sealed snapshot or out/data.js not found');
   const { board, radar: built } = buildRadar(snap);
-  const script = modelScript(modelFigures(snap, board, built));
-  assert.equal(readFileSync(new URL('../dashboard/model.js', import.meta.url), 'utf8'), script);
-  assert.equal(readFileSync(new URL('../out/dashboard/model.js', import.meta.url), 'utf8'), script);
+  const script = modelScript(modelFigures(snap, board, built), board.length, built.audit.watchlist);
+  assert.equal(readFileSync(new URL('../dashboard/1-model.js', import.meta.url), 'utf8'), script);
+  assert.equal(readFileSync(new URL('../out/dashboard/1-model.js', import.meta.url), 'utf8'), script);
   // Checked against lib directly and against data.js, not against modelFigures.
   const M = committedModel(), size = globalSizeAdjustment(snap), cal = calibrate(snap, size), iqr = (xs: number[]) => quantile(xs, .75) - quantile(xs, .25);
   assert.equal(M.size_center, size.center);
@@ -1607,4 +1607,67 @@ test('the dashboard\'s farm rules reproduce lib\'s farm figures', t => {
     const mine = UI.farmCost(r.plan_weeks), fe = r.farm_economics;
     assert.deepEqual([mine.runs, mine.hours, mine.low, mine.high, mine.fees], [fe.step_executions, fe.hours, fe.cost_usd_low, fe.cost_usd_high, r.plan_fees_usd], r.slug);
   }
+});
+
+// ---- Dashboard (radar-21 fix 35): held-out figures in the drawer, source read order, evidence map ----
+test('the drawer\'s held-out strip carries the Validation tiles\' own figures', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI } = loadDashboard(radar);
+    const tiles = all(UI.validation(radar), hasClass('vals'))[0]!;
+    const values = all(tiles, n => n.tagName === 'b').map(n => n.textContent);
+    const bandNote = all(tiles, hasClass('peer-detail'))[3]!.textContent;
+    const tileBands = [...bandNote.matchAll(/(\d+%) band held (\d+\.\d%)/g)].map(m => [m[1], m[2]]);
+    assert.equal(tileBands.length, 2, bandNote);
+    for (const r of radar.rows.slice(0, 5)) {
+      const strips = all(UI.detail(radar, r.slug), hasClass('peer-detail')).filter(n => n.textContent.startsWith('Held out:'));
+      assert.equal(strips.length, 1);
+      const text = strips[0]!.textContent;
+      assert.deepEqual(text.match(/×\d+\.\d\d/g), values.slice(0, 3), text);
+      assert.deepEqual([...text.matchAll(/(\d+%) band (\d+\.\d%)/g)].map(m => [m[1], m[2]]), tileBands, text);
+      assert.equal(values[3], tileBands[0]![1]);
+    }
+    return all(UI.detail(radar, radar.rows[0].slug), hasClass('peer-detail'))[0]!.textContent;
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed strip not checked');
+  assert.equal(check(sealed), 'Held out: median error factor (×1 = exact) leave-one-out ×3.45 (each peer priced without itself; strict ×3.74), walk-forward ×2.64 (earlier peers price later); peers inside 50% band 48.4%, 80% band 78.9%.');
+});
+
+test('the dossier reads the constants and chain() first; the page still loads in dependency order', t => {
+  const dir = new URL('../dashboard/', import.meta.url);
+  const names = readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  assert.deepEqual(names, ['1-model.js', '2-views.js', 'app.css', 'app.js', 'index.html', 'state.js']);
+  const html = readFileSync(new URL('index.html', dir), 'utf8');
+  assert.deepEqual([...html.matchAll(/<script src="([^"]+)">/g)].map(m => m[1]), ['../data.js', '1-model.js', 'state.js', '2-views.js', 'app.js']);
+  // In the views file the evidence comes first: the validation figures, chain(), derive() and the farm rules precede el().
+  const views = readFileSync(new URL('2-views.js', dir), 'utf8'), at = (s: string) => views.indexOf(s);
+  for (const fn of ['function valTiles(', 'function valLine(', 'function chain(', 'function derive(', 'var FARM =', 'function farmCost(']) assert.ok(at(fn) > 0 && at(fn) < at('function el('), fn);
+  const dossier = new URL('../out/dossier.json', import.meta.url);
+  if (!existsSync(dossier)) return t.diagnostic('out/dossier.json not found: dossier order not checked');
+  const text: string = JSON.parse(readFileSync(dossier, 'utf8')).text;
+  assert.deepEqual([...text.matchAll(/^### (.+)$/gm)].map(m => m[1]), names);
+  assert.ok(!text.includes('[Cut at') && Buffer.byteLength(text) <= 65536);
+});
+
+test('the evidence map atop 1-model.js names code that exists and numbers the data carries', t => {
+  const read = (f: string) => readFileSync(new URL(`../dashboard/${f}`, import.meta.url), 'utf8');
+  const model = read('1-model.js'), map = model.slice(0, model.indexOf('window.RADAR_MODEL'));
+  assert.ok(Buffer.byteLength(map) >= 300 && Buffer.byteLength(map) <= 520, String(Buffer.byteLength(map)));
+  const views = read('2-views.js'), state = read('state.js'), app = read('app.js');
+  for (const fn of ['header', 'board', 'chain', 'derive', 'farmCost', 'detail', 'valTiles', 'valLine', 'validation']) {
+    assert.ok(map.includes(`${fn}()`), fn);
+    assert.ok(views.includes(`function ${fn}(`), fn);
+  }
+  assert.ok(map.includes('FARM') && views.includes('var FARM ='));
+  assert.ok(map.includes('sorting and filters, state.js') && state.includes('function sortBy(') && state.includes("state.category === 'all'"));
+  assert.ok(map.includes('Prev / Next, app.js') && app.includes("dataset.nav === 'next'"));
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: map numbers not checked');
+  const w = radar.audit.watchlist, n = radar.rows.length;
+  assert.ok(map.includes(`watchlist ${w.present} of ${w.required}, ${n} ranked rows.`), map);
+  assert.ok(map.includes(`chain() gives all ${n} board values exactly.`), map);
+  assert.deepEqual([w.present, w.required, n, radar.board_size], [40, 40, 198, 198]);
+  // "all N board values exactly" is the chain() test above, over the same N rows of out/board.json.
+  assert.equal(JSON.parse(readFileSync(new URL('../out/board.json', import.meta.url), 'utf8')).rows.length, n);
 });
