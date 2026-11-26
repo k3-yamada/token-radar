@@ -1473,3 +1473,18 @@ test('EST / TVL column matches the drawer fact on every row, sorts like the othe
   if (!sealed) return t.diagnostic('out/data.js not found: sealed rows not checked');
   check(sealed);
 });
+
+// ---- Dashboard (radar-21 fix 32) ----
+// Source-level checks; the rendered behaviour (one line per header, identical geometry with the drawer open) is browser-measured.
+test('board header cells do not wrap, and the open row is marked without layout properties from the selected slug', () => {
+  const css = readFileSync(new URL('../dashboard/app.css', import.meta.url), 'utf8'), app = readFileSync(new URL('../dashboard/app.js', import.meta.url), 'utf8');
+  const rule = (sel: string) => { const m = css.match(new RegExp('(?:^|[}\\n])' + sel.replace(/[.]/g, '\\.') + '\\{([^}]*)\\}')); assert.ok(m, sel); return m![1]!.split(';'); };
+  // nowrap on the cell, so the label, the sort mark, the tip and the scale note share one line in every header.
+  assert.ok(rule('.board th').includes('white-space:nowrap'));
+  // The mark paints only: a background and an inset accent bar, nothing that takes space.
+  assert.deepEqual(rule('.board .on').map(d => d.split(':')[0]), ['background', 'box-shadow']);
+  assert.match(rule('.board .on')[1]!, /^box-shadow:inset /);
+  // One function toggles the class from the shown slug: on open / close (renderDetail) and on every Prev / Next step.
+  assert.ok(app.includes("r.classList.toggle('on', r.dataset.slug === s)"));
+  assert.ok(app.includes('mark(v.selected);') && app.includes('mark(slug);'));
+});

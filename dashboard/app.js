@@ -26,7 +26,7 @@
   }
 
   var html = document.documentElement, page, shortlistRegion, boardRegion, detailRegion, toTop;
-  var opener = null, openerRegion = null, trail = [];
+  var opener, openerRegion, trail = [];
   function slugOf(r) { return r.slug; }
 
   function mount() {
@@ -74,8 +74,13 @@
     onScroll();
   }
 
+  function mark(s) {
+    boardRegion.querySelectorAll('tr').forEach(function (r) { r.classList.toggle('on', r.dataset.slug === s); });
+  }
+
   function renderDetail() {
     var v = State.compute(), detail = v.selected && UI.detail(v.data, v.selected), scrim = document.createElement('div');
+    mark(v.selected);
     detailRegion.replaceChildren();
     page.inert = !!detail;
     html.style.paddingRight = detail ? innerWidth - html.clientWidth + 'px' : '';
@@ -95,6 +100,7 @@
       b = document.activeElement.dataset.nav;
       f = UI.detail(State.getData(), slug);
       State.update({ selected: slug });
+      mark(slug);
       d.replaceChildren.apply(d, f.childNodes);
       d.setAttribute('aria-label', f.getAttribute('aria-label'));
       d.scrollTop = 0;
