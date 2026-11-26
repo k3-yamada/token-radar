@@ -972,7 +972,9 @@ test('grade strip counts the filtered rows by grade, ignoring only the grade fil
   assert.deepEqual({ ...unfiltered.grades }, count(unfiltered));
   const board = UI.board(unfiltered);
   const results = all(board, n => n.dataset.results === 'board')[0]!;
-  const [strip, wrap, live] = results.children as [DomNode, DomNode, DomNode];
+  // radar-21 fix (36): the count sits between the grade strip and the table, so a filtered frame shows it above the rows.
+  const [strip, live, wrap] = results.children as [DomNode, DomNode, DomNode];
+  assert.ok(wrap.className === 'table-wrap' && live.className === 'count');
   assert.equal(live.attributes['aria-live'], 'polite');
   assert.equal(live.textContent, `${radar.rows.length} of ${radar.rows.length} protocols`);
   // Only the count is a live region, and the three filter selects are named.
@@ -995,7 +997,7 @@ test('grade strip counts the filtered rows by grade, ignoring only the grade fil
   assert.deepEqual({ ...watched.grades }, count(State.update({ grade: 'all' })));
   State.update({ watchlist: false, grade });
   // Same three nodes, new contents.
-  assert.deepEqual(results.children, [strip, wrap, live]);
+  assert.deepEqual(results.children, [strip, live, wrap]);
   assert.equal(live.textContent, `${filtered.rows.length} of ${radar.rows.length} protocols`);
   assert.equal(strip.textContent.replace(/i$/, ''), ['A', 'B', 'C'].map(g => `${g} ${filtered.grades[g]}`).join(''));
   assert.equal(all(wrap, n => n.tagName === 'tr' && n.dataset.slug !== undefined).length, filtered.rows.length);
@@ -1013,7 +1015,8 @@ test('detail shows the derivation step by step and labels which peer measure it 
       const steps = all(all(detail, hasClass('derivation'))[0]!, n => n.tagName === 'li').map(n => n.textContent);
       assert.equal(steps.length, 3);
       assert.ok(steps[0]!.startsWith(`TVL ${UI.usd(r.tvl_usd)} × ratio ${r.category_ratio_used} × bias correction ${radar.bias_correction_factor.toFixed(3)} = base ${UI.usd(r.base_usd)}.`), steps[0]);
-      assert.ok(steps[0]!.includes(r.ratio_basis === 'category' ? `the ${r.category_ratio_source} set (${r.ratio_live_count} live peers)` : 'the global set'), steps[0]);
+      assert.ok(steps[0]!.includes(r.ratio_basis === 'category' ? `the ${r.category_ratio_source} set (${r.ratio_live_count} live peers), shrunk toward the global set` : r.ratio_basis === 'global-anchored' ? `the global set shrunk toward ${r.category_ratio_source}’s single live peer (global-anchored basis)` : 'the global set, because the category has no live peers'), steps[0]);
+      assert.ok(!steps[0]!.includes('global set, because ' + r.category_ratio_source), steps[0]);
       assert.ok(steps[1]!.startsWith(`Base ${UI.usd(r.base_usd)} × growth multiplier ${r.growth_multiplier} = `), steps[1]);
       assert.ok(steps[2]!.includes(` × maturity multiplier ${r.maturity_multiplier} = implied value ${UI.usd(r.implied_value_usd)}.`), steps[2]);
       assert.ok(steps[2]!.includes(r.age_days == null ? `the ${radar.derived_unknown_listed_age_days}-day fallback age is used` : `age used: ${r.age_days} days`), steps[2]);
@@ -1059,11 +1062,12 @@ test('validation section renders every ablation row, the four headline figures a
       assert.equal(ablationCells[i]![1], row.median_absolute_log_error.toFixed(4));
       assert.equal(ablationCells[i]![2], `×${row.error_factor.toFixed(2)}`);
       assert.equal(ablationCells[i]![3]!.includes('beats full model'), row.beats_full);
-      if (row.beats_full) assert.ok(text.includes(`${row.label} beats the full model by ${(-row.delta_vs_full).toFixed(4)}.`));
+      // radar-21 fix (36): the table cell carries it; the note no longer repeats it as a sentence.
+      assert.ok(!text.includes(`${row.label} beats the full model by`));
     });
     const tiles = all(section, hasClass('metric')).map(n => n.textContent);
     assert.equal(tiles.length, 4);
-    assert.ok(tiles[0]!.includes(`×${v.loo.error_factor.toFixed(2)}`) && tiles[0]!.includes(v.loo.median_absolute_log_error.toFixed(4)) && tiles[0]!.includes(`all ${v.loo.count} tokenized peers`));
+    assert.ok(tiles[0]!.includes(`×${v.loo.error_factor.toFixed(2)}`) && tiles[0]!.includes(v.loo.median_absolute_log_error.toFixed(4)) && tiles[0]!.includes(`all ${v.loo.count} tokenized peers with a market cap,`) && !tiles[0]!.includes('perfect'));
     assert.ok(tiles[1]!.includes(`×${v.loo.strict.error_factor.toFixed(2)}`) && tiles[1]!.includes(v.loo.strict.median_absolute_log_error.toFixed(4)));
     if (v.walkForward.median_absolute_log_error != null) assert.ok(tiles[2]!.includes(`×${v.walkForward.error_factor.toFixed(2)}`) && tiles[2]!.includes(`split at ${v.walkForward.split_date}`) && tiles[2]!.includes(`earlier ${v.walkForward.train_count}`) && tiles[2]!.includes(`later ${v.walkForward.test_count}`));
     else assert.ok(tiles[2]!.startsWith('—'));
@@ -1082,7 +1086,7 @@ test('validation section renders every ablation row, the four headline figures a
   edited.validation.ablation.rows[3].beats_full = true;
   edited.validation.ablation.rows[3].delta_vs_full = -0.5;
   const text = check(edited);
-  assert.ok(text.includes('×7.77') && text.includes('Renamed variant beats the full model by 0.5000.'));
+  assert.ok(text.includes('×7.77') && text.includes('Renamed variant') && text.includes('−0.5000 · beats full model'));
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed validation not checked');
   check(sealed);
@@ -1508,7 +1512,7 @@ test('sealed snapshot: dashboard/1-model.js is the build\'s own emit, and each c
   const snap = sealedSnapshot(), radar = sealedRadar();
   if (!snap || !radar) return t.skip('sealed snapshot or out/data.js not found');
   const { board, radar: built } = buildRadar(snap);
-  const script = modelScript(modelFigures(snap, board, built), board.length, built.audit.watchlist);
+  const script = modelScript(modelFigures(snap, board, built), board.length, built.audit);
   assert.equal(readFileSync(new URL('../dashboard/1-model.js', import.meta.url), 'utf8'), script);
   assert.equal(readFileSync(new URL('../out/dashboard/1-model.js', import.meta.url), 'utf8'), script);
   // Checked against lib directly and against data.js, not against modelFigures.
@@ -1556,8 +1560,10 @@ test('sealed data: the derivation block displays every constant at the model\'s 
   assert.ok(rule('Category').includes(`global n ${cal.global.count}, m_g ${f4(cal.global.median)}, IQR_g ${f4(gIqr)}`));
   assert.ok(rule('Shrinkage').includes(`k = ${MODEL.shrinkage_k} × IQR / IQR_g in [2, 24], ${MODEL.shrinkage_k} if n < 4; w = n/(n + k); centre = w × m + (1 - w) × m_g`));
   assert.ok(rule('Size').includes(`b ${f4(size.slope)} = OLS slope of ln mcap on ln TVL - 1, c ${f4(size.center)} = median ln TVL`));
-  assert.ok(rule('Growth').includes(`g = (1 + ${MODEL.growth_weight}(2p - 1))^${M.amp[0]} / ${f4(M.growth[1])} (scored-row median)`));
-  assert.ok(rule('Maturity').includes(`m = (${MODEL.maturity_min_factor} + ${MODEL.maturity_range} ln(1 + min(age, ${MODEL.maturity_cap_days})) / ln ${MODEL.maturity_cap_days + 1})^${M.amp[1]} / ${f4(M.maturity[3])} (same); no date: ${radar.derived_unknown_listed_age_days} d`));
+  // An amplitude of 1 prints no exponent; any other amplitude is printed (the fitted-amplitude test above).
+  const pw = (a: number) => a === 1 ? '' : `^${a}`;
+  assert.ok(rule('Growth').includes(`g = (1 + ${MODEL.growth_weight}(2p - 1))${pw(M.amp[0])} / ${f4(M.growth[1])} (scored-row median)`));
+  assert.ok(rule('Maturity').includes(`m = (${MODEL.maturity_min_factor} + ${MODEL.maturity_range} ln(1 + min(age, ${MODEL.maturity_cap_days})) / ln ${MODEL.maturity_cap_days + 1})${pw(M.amp[1])} / ${f4(M.maturity[3])} (same); no date: ${radar.derived_unknown_listed_age_days} d`));
   assert.ok(rule('Value').includes(`TVL × e^size × g × m × ${f4(radar.bias_correction_factor)}, bias correction`));
   // The worked example: rank 1, its category's own figures, ending at the board value.
   const top = radar.rows.find((r: any) => r.rank === 1), s = cal.categories.get(top.category)!, c = cal.samples.get(top.category)!;
@@ -1653,9 +1659,9 @@ test('the dossier reads the constants and chain() first; the page still loads in
 test('the evidence map atop 1-model.js names code that exists and numbers the data carries', t => {
   const read = (f: string) => readFileSync(new URL(`../dashboard/${f}`, import.meta.url), 'utf8');
   const model = read('1-model.js'), map = model.slice(0, model.indexOf('window.RADAR_MODEL'));
-  assert.ok(Buffer.byteLength(map) >= 300 && Buffer.byteLength(map) <= 520, String(Buffer.byteLength(map)));
+  assert.ok(Buffer.byteLength(map) >= 300 && Buffer.byteLength(map) <= 620, String(Buffer.byteLength(map)));
   const views = read('2-views.js'), state = read('state.js'), app = read('app.js');
-  for (const fn of ['header', 'board', 'chain', 'derive', 'farmCost', 'detail', 'valTiles', 'valLine', 'validation']) {
+  for (const fn of ['header', 'board', 'chain', 'derive', 'farmCost', 'detail', 'valTiles', 'valLine', 'validation', 'live']) {
     assert.ok(map.includes(`${fn}()`), fn);
     assert.ok(views.includes(`function ${fn}(`), fn);
   }
@@ -1667,7 +1673,102 @@ test('the evidence map atop 1-model.js names code that exists and numbers the da
   const w = radar.audit.watchlist, n = radar.rows.length;
   assert.ok(map.includes(`watchlist ${w.present} of ${w.required}, ${n} ranked rows.`), map);
   assert.ok(map.includes(`chain() gives all ${n} board values exactly.`), map);
+  // radar-21 fix (36): the accounting line, each figure from the audit, and every sum it states holds.
+  const a = radar.audit;
+  assert.ok(map.includes(`// Accounting: ${a.total} = ${a.tokenized} tokenized (never ranked; live()) + ${a.pre_token} pre-token = ${a.ranked_rows} ranked + ${a.excluded_pre_token} excluded; header().\n`), map);
+  assert.deepEqual([a.total, a.tokenized, a.pre_token, a.ranked_rows, a.excluded_pre_token], [758, 416, 342, 198, 144]);
+  assert.equal(a.tokenized + a.pre_token, a.total);
+  assert.equal(a.ranked_rows + a.excluded_pre_token, a.pre_token);
+  assert.equal(a.excluded_pre_token_by_reason.reduce((s: number, x: { count: number }) => s + x.count, 0), a.excluded_pre_token);
+  assert.deepEqual(JSON.parse(JSON.stringify(a.sums)), { tokenized_plus_pre_token_equals_total: true, ranked_plus_excluded_equals_pre_token: true, every_ranked_row_is_pre_token: true });
+  // "never ranked": no board row records a token, and live() lists the tokenized calibration peers, none of them on the board.
+  const slugs = new Set(radar.rows.map((r: DashRow) => r.slug));
+  assert.ok(radar.live.length > 0 && radar.live.every((x: { slug: string }) => !slugs.has(x.slug)));
+  assert.ok(all(loadDashboard(radar).UI.header(radar), hasClass('audit'))[0]!.textContent.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token · ${a.ranked_rows} ranked · ${a.excluded_pre_token} excluded (`));
   assert.deepEqual([w.present, w.required, n, radar.board_size], [40, 40, 198, 198]);
   // "all N board values exactly" is the chain() test above, over the same N rows of out/board.json.
   assert.equal(JSON.parse(readFileSync(new URL('../out/board.json', import.meta.url), 'utf8')).rows.length, n);
+});
+
+// ---- Dashboard (radar-21 fix 36): the value inputs on the board, wording that matches the derivation ----
+test('the 7d · age column prints each row\'s own 7-day change and age, the drawer\'s inputs, and stays unsortable', t => {
+  const cell = (r: DashRow) => (r.change_7d == null ? '—' : r.change_7d.toFixed(1) + '%') + ' · ' + (r.age_days == null ? '—' : r.age_days + 'd');
+  const check = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar);
+    State.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
+    const board = UI.board(State.compute()), th = all(board, n => n.tagName === 'th');
+    assert.equal(th[5]!.className, 'c5');
+    assert.ok(th[5]!.textContent.startsWith('7d · age'));
+    assert.equal(all(th[5]!, n => n.dataset.sort !== undefined).length, 0);
+    assert.equal(all(th[5]!, hasClass('info-tip'))[0]!.dataset.tip, 'Value inputs: 7-day TVL change, days since listed.');
+    assert.ok(!th.some(h => h.textContent.startsWith('Tokenized peers')));
+    const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
+    assert.equal(rows.length, radar.rows.length);
+    for (const tr of rows) {
+      const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug);
+      assert.equal(tr.children[5]!.textContent, cell(r), r.slug);
+      // The same two inputs the drawer's derivation prints for this row.
+      const notes = all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('note')).map(n => n.textContent);
+      assert.ok(notes[1]!.includes(r.change_7d == null ? 'not reported' : `7-day TVL change: ${r.change_7d}%`), notes[1]);
+      assert.ok(notes[2]!.includes(r.age_days == null ? 'fallback age' : `age used: ${r.age_days} days`), notes[2]);
+    }
+    return rows.map(tr => tr.children[5]!.textContent);
+  };
+  check(dashboardFixtureRadar());
+  // The column keeps the fix (32) width budget: same fixed widths, one-line header cells.
+  const css = readFileSync(new URL('../dashboard/app.css', import.meta.url), 'utf8');
+  assert.ok(css.includes('.board table{table-layout:fixed;min-width:1181px}') && css.includes('.c5{width:140px}') && /\.board th\{[^}]*white-space:nowrap/.test(css));
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed column not checked');
+  const cells = check(sealed);
+  assert.equal(cells[0], '2.4% · 407d');
+  assert.ok(Math.max(...cells.map(c => c.length)) <= 14, String(Math.max(...cells.map(c => c.length))));
+  assert.equal(cells.filter(c => c.startsWith('—')).length, sealed.rows.filter((r: DashRow) => r.change_7d == null).length);
+  assert.equal(cells.filter(c => c.endsWith('—')).length, sealed.rows.filter((r: DashRow) => r.age_days == null).length);
+});
+
+test('sealed data: the drawer\'s ratio wording follows the peer count and the weight chain() gives the category', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI } = loadDashboard(radar, M), seen: Record<string, number> = {};
+  for (const r of radar.rows as DashRow[]) {
+    const x = UI.chain(M, r, .5), n = x.c[0], text = all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('note'))[0]!.textContent;
+    assert.equal(n, r.ratio_live_count, r.slug);
+    if (n >= 2) {
+      // Category set, pulled toward the global set by 1 - w.
+      assert.equal(r.ratio_basis, 'category');
+      assert.ok(x.w > 0 && x.w < 1);
+      assert.ok(text.includes(`from the ${r.category_ratio_source} set (${n} live peers), shrunk toward the global set`), text);
+    } else if (n === 1) {
+      // The global set carries 1 - w, and the single peer w = 1 / (1 + k): shrunk toward the peer, not the global set alone.
+      assert.equal(r.ratio_basis, 'global-anchored');
+      assert.equal(x.w, 1 / (1 + M.k[0]));
+      assert.ok(text.includes(`from the global set shrunk toward ${r.category_ratio_source}’s single live peer (global-anchored basis)`), text);
+    } else {
+      // No peer: the centre is the global median alone.
+      assert.equal(r.ratio_basis, 'global');
+      assert.equal(x.w, 0);
+      assert.equal(x.centre, M.global[1]);
+      assert.ok(text.includes('from the global set, because the category has no live peers'), text);
+    }
+    seen[r.ratio_basis] = (seen[r.ratio_basis] ?? 0) + 1;
+  }
+  assert.deepEqual(seen, { 'global-anchored': 47, category: 133, global: 18 });
+});
+
+test('Start here and the launch-context table say what they count', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar);
+    const v = State.compute(), p = all(UI.shortlist(v), n => n.tagName === 'p')[0]!.textContent;
+    assert.ok(p.startsWith('The largest estimates graded A or B'), p);
+    assert.ok(!p.includes('real evidence'));
+    for (const r of v.shortlist) assert.ok(p.includes(`(${(100 * r.peer_token_share).toFixed(1)}% of TVL tokenized)`), p);
+    assert.equal(all(UI.validation(radar), n => n.tagName === 'th')[4]!.textContent, 'Listed age');
+    // The table counts every protocol, tokenized or not: that is why it is "Listed age", not "Tokenless age".
+    assert.equal(radar.launchContext.bands.reduce((s: number, b: { n: number }) => s + b.n, 0), radar.audit.total);
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed wording not checked');
+  check(sealed);
 });

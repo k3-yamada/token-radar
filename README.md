@@ -18,7 +18,7 @@ Every figure below is computed by the build from the sealed snapshot, for the ex
 
 | Test | Definition | Median abs log error | Factor |
 | --- | --- | --- | --- |
-| Leave-one-out | All 128 tokenized peers (market cap and TVL above 0). Calibration sets and factor normalizers are refit without the held-out peer; the size slope and the bias correction are the full-sample constants the board ships. | 1.2378 | ×3.45 |
+| Leave-one-out | All 128 tokenized peers with a market cap (market cap and TVL above 0). Calibration sets and factor normalizers are refit without the held-out peer; the size slope and the bias correction are the full-sample constants the board ships. | 1.2378 | ×3.45 |
 | Strict leave-one-out | The fully refit variant: the size slope is also refit in every fold, and each peer is bias-corrected with the median error of the other peers. | 1.3191 | ×3.74 |
 | Walk-forward | The 95 peers with a listing date, split at the median date 2024-02-18. Every fitted quantity comes from the earlier 48; the later 47 are predicted once. The 33 undated peers are in neither half. | 0.9702 | ×2.64 |
 
