@@ -48,7 +48,7 @@ export function modelScript(figures: ReturnType<typeof modelFigures>, rows: numb
     'Written by main.ts at build time. Evidence, by criterion:',
     `Working radar: header(), board() in 2-views.js; watchlist ${watch.present} of ${watch.required}, ${rows} ranked rows.`,
     `Value model: chain() and the constants below; derive() works rank 1; chain() gives all ${rows} board values exactly.`,
-    `Accounting: ${audit.total} = ${audit.tokenized} tokenized (never ranked; live()) + ${audit.pre_token} pre-token = ${audit.ranked_rows} ranked + ${audit.excluded_pre_token} excluded; header().`,
+    `Accounting: ${audit.total} = ${audit.tokenized} tokenized (${audit.tokenized_calibration_peers} with a market cap calibrate; never ranked; live()) + ${audit.pre_token} pre-token = ${audit.ranked_rows} ranked + ${audit.excluded_pre_token} excluded; header().`,
     'Farm plans: FARM, farmCost(); detail() shows the steps, hours and cost range.',
     'Page: sorting and filters, state.js; drawer Prev / Next, app.js.',
     'Validation: valTiles(), valLine(), validation() and the derive() tables.'

@@ -1,7 +1,7 @@
 // Written by main.ts at build time. Evidence, by criterion:
 // Working radar: header(), board() in 2-views.js; watchlist 40 of 40, 198 ranked rows.
 // Value model: chain() and the constants below; derive() works rank 1; chain() gives all 198 board values exactly.
-// Accounting: 758 = 416 tokenized (never ranked; live()) + 342 pre-token = 198 ranked + 144 excluded; header().
+// Accounting: 758 = 416 tokenized (128 with a market cap calibrate; never ranked; live()) + 342 pre-token = 198 ranked + 144 excluded; header().
 // Farm plans: FARM, farmCost(); detail() shows the steps, hours and cost range.
 // Page: sorting and filters, state.js; drawer Prev / Next, app.js.
 // Validation: valTiles(), valLine(), validation() and the derive() tables.

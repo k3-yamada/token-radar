@@ -12,7 +12,7 @@
       [factor(v.loo), 'Leave-one-out · log error ' + error(v.loo), 'Median absolute log error over all ' + v.loo.count + ' tokenized peers with a market cap, each predicted without itself. Unclamped, no peer dropped.'],
       [factor(v.loo.strict), 'Strict LOO · ' + error(v.loo.strict), 'The same, with the size slope and the bias correction refit in every fold.'],
       [factor(w), 'Walk-forward · ' + error(w), w.dated_peers + ' dated peers split at ' + w.split_date + ': fitted on the earlier ' + w.train_count + ', the later ' + w.test_count + ' predicted once.'],
-      [pct(bands[0].held_out.coverage), 'Band coverage, held out (nominal\xa0' + nominal(bands[0]) + ')', 'Nominal ' + held(bands[0]) + '; nominal ' + held(bands[1]) + ', against the other peers’ residual quantiles.']
+      [pct(bands[0].held_out.coverage), 'Band coverage, held out', 'Nominal ' + held(bands[0]) + '; nominal ' + held(bands[1]) + ', against the other peers’ residual quantiles.']
     ].forEach(function (x) {
       var m = metric(tiles, x);
       if (parts > 2) m.append(note(x[2]));
@@ -221,7 +221,7 @@
     var h = el('header', 'header'), title = el('div');
     var heading = el('div', 'title-line');
     heading.append(el('h1', '', 'Pre-token watchlist'), tip('Select any row for its derivation and farm plan.'));
-    title.append(el('div', 'eyebrow', 'TOKEN LAUNCH RADAR · ' + d.model_version.toUpperCase()), heading);
+    title.append(el('div', 'eyebrow', 'TOKEN LAUNCH RADAR'), heading);
     var metrics = el('div', 'metrics');
     [[d.scanned_size, 'Protocols scanned'], [d.watchlist_size, 'Watchlist covered'], [d.board_size, 'Board rows']].forEach(function (x) { metric(metrics, x); });
     var a = d.audit;
@@ -260,7 +260,7 @@
       return Object.keys(n).map(function (k) { return n[k] + ' ' + k; });
     }
     var grades = tally(function (r) { return 'grade ' + r.confidence; }), cats = tally(function (r) { return category(r) + ' (' + pct(r.peer_token_share) + ' of TVL tokenized)'; });
-    s.append(el('h2', '', 'Start here'), el('p', '', 'The largest estimates graded A or B' + (cats[0] ? ': ' + (grades[1] ? '' : 'all ') + grades.join(', ') + '; ' + cats.join(', ') : '') + '.'));
+    s.append(el('h2', '', 'Start here'), el('p', '', 'Largest A or B estimates' + (cats[0] ? ': ' + (grades[1] ? '' : 'all ') + grades.join(', ') + '; ' + cats.join(', ') : '') + '.'));
     var list = el('div', 'shortlist');
     var scale = valueScale(v.data.rows);
     v.shortlist.forEach(function (r) {
@@ -329,7 +329,7 @@
       var row = el('tr');
       row.tabIndex = 0;
       row.dataset.slug = r.slug;
-      var rank = el('td', 'rank-cell', r.rank), name = el('td', 'protocol', r.name), cat = el('td', '', category(r)), chains = el('td', 'chains-cell'), tvl = el('td', 'tvl-cell num'), peers = el('td', 'num', (r.change_7d == null ? '—' : r.change_7d.toFixed(1) + '%') + ' · ' + (r.age_days == null ? '—' : r.age_days + 'd')), val = el('td');
+      var rank = el('td', 'rank-cell', r.rank), name = el('td', 'protocol', r.name), cat = el('td', '', category(r)), chains = el('td', 'chains-cell'), tvl = el('td', 'tvl-cell num'), inp = el('td', 'num', (r.change_7d == null ? '—' : r.change_7d.toFixed(1).replace('-0.0', '0.0') + '%') + ' · ' + (r.age_days == null ? '—' : r.age_days + 'd')), val = el('td');
       var rowChains = r.chains || [];
       chains.textContent = rowChains.length ? rowChains[0] + (rowChains.length > 1 ? ' +' + (rowChains.length - 1) : '') : '—';
       chains.title = rowChains.join(', ');
@@ -344,7 +344,7 @@
       main.append(el('b', 'primary-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale));
       main.appendChild(grade(r.confidence, gradeMeaning(v.data, r.confidence) + ageLine(v.data, r)));
       val.appendChild(main);
-      row.append(rank, name, cat, chains, tvl, peers, val, el('td', 'num', estTvl(r)));
+      row.append(rank, name, cat, chains, tvl, inp, val, el('td', 'num', estTvl(r)));
       body.appendChild(row);
     });
     if (!v.rows.length) {
@@ -416,7 +416,7 @@
     var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div');
     s.append(section('Validation', 'Computed at build time from the sealed snapshot, for the exact model the board ships.'));
     left.append(tableOf(['Ablation, same leave-one-out', 'Error', 'Factor', 'vs full'], v.ablation.rows.map(function (r) {
-      return [r.label, error(r), factor(r), r.key === 'full' ? '—' : (r.delta_vs_full > 0 ? '+' : '−') + Math.abs(r.delta_vs_full).toFixed(4) + (r.beats_full ? ' · beats full model' : '')];
+      return [r.label, error(r), factor(r), r.key === 'full' ? '—' : (r.delta_vs_full > 0 ? '+' : '−') + Math.abs(r.delta_vs_full).toFixed(4) + (r.beats_full ? ' · within noise' : '')];
     }), 1), note('The size adjustment carries the model; growth and maturity help modestly; a plain curve is within noise.'));
     right.append(tableOf(['Listed age', 'Protocols', 'With token', 'Share'], d.launchContext.bands.map(function (b) {
       return [b.band, b.n, b.with_token_record, pct(b.share_with_token_record)];
@@ -476,7 +476,7 @@
   function derivation(d, r) {
     var wrap = el('div', 'derivation'), list = el('ol', 'steps');
     var basis = r.ratio_basis === 'category' ? 'the ' + r.category_ratio_source + ' set (' + r.ratio_live_count + ' live peers), shrunk toward the global set'
-      : r.ratio_basis === 'global-anchored' ? 'the global set shrunk toward ' + r.category_ratio_source + '’s single live peer (global-anchored basis)'
+      : r.ratio_basis === 'global-anchored' ? 'the global set shrunk toward the single live ' + r.category_ratio_source + ' peer (global-anchored basis)'
       : 'the global set, because the category has no live peers';
     var bias = d.bias_correction_factor, afterGrowth = r.base_usd * r.growth_multiplier;
     var age = r.age_days == null ? 'listing date unknown, so the ' + d.derived_unknown_listed_age_days + '-day fallback age is used' : 'age used: ' + r.age_days + ' days, listed ' + r.listed_at;
@@ -524,7 +524,7 @@
     take.appendChild(note('Assumed, not snapshot data: gas $' + FARM.gas[0] + '-$' + FARM.gas[1] + ' and ' + FARM.minutes + ' minutes per step, time at $' + FARM.hourly + '/hour.'));
     s.appendChild(take);
     var steps = el('ol', 'steps');
-    r.farm_steps.forEach(function (x) { steps.appendChild(el('li', '', x)); });
+    r.farm_steps.forEach(function (x) { x = x.split(/ (?=Cost: )/); steps.appendChild(el('li', '', x[0])).appendChild(el('small', 'cost', x[1])); });
     s.append(el('h3', '', 'Derivation and farm plan'), derivation(d, r), el('h4', 'steps-label', 'Farm plan'), steps);
     return s;
   }
