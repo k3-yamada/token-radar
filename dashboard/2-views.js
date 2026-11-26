@@ -65,11 +65,12 @@
     return pair;
   }
 
-  var FARM = { steps: [['open app', 0], ['check risks', 0], ['deposit', 0], ['weekly action', 1], ['governance', 0], ['withdraw', 0]], gas: [1, 8], minutes: 15, hourly: 30 };
+  var FARM = { steps: [['open app', 0], ['check risks', 0], ['deposit', 0], ['weekly action', 1], ['engage once', 0], ['exit', 0]], gas: { Ethereum: [1, 8], Tron: [1, 10], Bitcoin: [.4, 5], 'Solana|Algorand|Stellar|Ripple|Aptos|Sui|Bittensor|Noble|XION|Provenance': [.001, .05], 'Proton|Qubic': [0, .01], other: [.01, .25] }, minutes: 15, hourly: 30 };
 
-  function farmCost(weeks) {
-    var runs = FARM.steps.reduce(function (sum, x) { return sum + (x[1] ? weeks : 1); }, 0), hours = runs * FARM.minutes / 60, time = hours * FARM.hourly;
-    return { runs: runs, hours: hours, fees: runs * (FARM.gas[0] + FARM.gas[1]) / 2, low: runs * FARM.gas[0] + time, high: runs * FARM.gas[1] + time };
+  function farmCost(weeks, chain) {
+    var g = FARM.gas.other, runs = FARM.steps.reduce(function (sum, x) { return sum + (x[1] ? weeks : 1); }, 0), hours = runs * FARM.minutes / 60, time = hours * FARM.hourly;
+    for (var k in FARM.gas) if (k.split('|').indexOf(chain) >= 0) g = FARM.gas[k];
+    return { runs: runs, hours: hours, gas: g, fees: runs * (g[0] + g[1]) / 2, low: runs * g[0] + time, high: runs * g[1] + time };
   }
 
   function el(tag, cls, text) {
@@ -95,9 +96,7 @@
 
   function estTvl(r) { return fixed3(r.implied_value_usd / r.tvl_usd); }
 
-  function sig(n) {
-    return fixed3(n).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
-  }
+  function sig(n) { return fixed3(n).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, ''); }
 
   var USD_UNITS = ['', 'K', 'M', 'B', 'T'];
 
@@ -108,9 +107,7 @@
     return '$' + sig(n / Math.pow(1000, unit)) + USD_UNITS[unit];
   }
 
-  function ratio(n) {
-    return fixed3(n) + '×';
-  }
+  function ratio(n) { return fixed3(n) + '×'; }
 
   function nodeOption(select, label, value) {
     var o = el('option', '', label);
@@ -124,13 +121,16 @@
     return h;
   }
 
+  function attrs(n, o) {
+    for (var k in o) n.setAttribute(k, o[k]);
+    return n;
+  }
+
   function tip(text, alignRight) {
     var marker = el('span', alignRight ? 'info-tip info-tip-right' : 'info-tip', 'i');
     marker.tabIndex = 0;
     marker.dataset.tip = text;
-    marker.setAttribute('role', 'img');
-    marker.setAttribute('aria-label', text);
-    return marker;
+    return attrs(marker, { role: 'img', 'aria-label': text });
   }
 
   var LC_LABEL = 'share of protocols this age that record a token (cross-sectional share, not a launch probability; not used in the value or the rank)';
@@ -139,9 +139,7 @@
 
   function category(r) { return r.category || 'Other'; }
 
-  function pct(x) {
-    return (100 * x).toFixed(1) + '%';
-  }
+  function pct(x) { return (100 * x).toFixed(1) + '%'; }
 
   function ageLine(d, r) {
     var c = d.launchContext.rows[r.slug];
@@ -161,15 +159,13 @@
     return table;
   }
 
-  function grade(g, explain) {
-    var wrap = el('span', 'grade-wrap');
-    wrap.append(el('span', 'grade grade-' + g.toLowerCase(), g), tip(explain));
+  function grade(d, r, more) {
+    var g = r.confidence, wrap = el('span', 'grade-wrap');
+    wrap.append(el('span', 'grade grade-' + g.toLowerCase(), g), tip(gradeMeaning(d, g) + (more || '')));
     return wrap;
   }
 
-  function needs(q, kind) {
-    return q.min_peers + kind + ' peers and band ratio at most ' + q.max_band_ratio;
-  }
+  function needs(q, kind) { return q.min_peers + kind + ' peers and band ratio at most ' + q.max_band_ratio; }
 
   function times(m) { return Math.exp(m.median_absolute_log_error).toFixed(1); }
 
@@ -268,7 +264,7 @@
       open.type = 'button';
       open.dataset.slug = r.slug;
       open.setAttribute('aria-label', r.name + ', ' + usd(r.implied_value_usd) + ' implied value, grade ' + r.confidence + '. Open detail');
-      item.append(el('span', 'rank-badge num', r.rank), open, el('span', 'short-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale, category(r) + ' · TVL ' + usd(r.tvl_usd)), grade(r.confidence, gradeMeaning(v.data, r.confidence)));
+      item.append(el('span', 'rank-badge num', r.rank), open, el('span', 'short-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale, category(r) + ' · TVL ' + usd(r.tvl_usd)), grade(v.data, r));
       list.appendChild(item);
     });
     if (!v.shortlist.length) list.appendChild(el('p', '', 'No rows have enough evidence for this shortlist.'));
@@ -288,11 +284,7 @@
 
   function updateBoardResults(sectionEl, v) {
     if (!sectionEl.children.length) {
-      var liveCount = el('p', 'count');
-      liveCount.setAttribute('role', 'status');
-      liveCount.setAttribute('aria-live', 'polite');
-      liveCount.setAttribute('aria-atomic', 'true');
-      sectionEl.append(el('div', 'grade-strip'), liveCount, el('div', 'table-wrap'));
+      sectionEl.append(el('div', 'grade-strip'), attrs(el('p', 'count'), { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }), el('div', 'table-wrap'));
     }
     var scale = valueScale(v.data.rows), picks = v.shortlist.map(function (r) { return r.slug; });
     var tvls = v.data.rows.map(function (r) { return r.tvl_usd; }), minTvl = Math.min.apply(null, tvls), tvlSpan = Math.log(Math.max.apply(null, tvls) / minTvl) || 1;
@@ -342,7 +334,7 @@
       if (pick) tags.appendChild(el('span', 'short-tag', 'SHORTLIST'));
       var main = el('div', 'value-line');
       main.append(el('b', 'primary-value num', usd(r.implied_value_usd)), band(r.value_low_usd, r.implied_value_usd, r.value_high_usd, scale));
-      main.appendChild(grade(r.confidence, gradeMeaning(v.data, r.confidence) + ageLine(v.data, r)));
+      main.appendChild(grade(v.data, r, ageLine(v.data, r)));
       val.appendChild(main);
       row.append(rank, name, cat, chains, tvl, inp, val, el('td', 'num', estTvl(r)));
       body.appendChild(row);
@@ -405,7 +397,7 @@
       range.style.left = left + '%';
       range.style.width = Math.min(100 - left, Math.max(1, (r.value_high_usd - r.value_low_usd) / max * 100)) + '%';
       track.append(point, range);
-      row.append(label, track, el('span', 'num bar-value', usd(r.implied_value_usd)), grade(r.confidence, gradeMeaning(v.data, r.confidence)));
+      row.append(label, track, el('span', 'num bar-value', usd(r.implied_value_usd)), grade(v.data, r));
       list.appendChild(row);
     });
     s.appendChild(list);
@@ -433,9 +425,7 @@
     var s = el('details', 'below method disclosure'), summary = el('summary', 'disclosure-summary'), m = d.model;
     summary.append(el('b', '', 'Model and calibration'), el('span', '', d.model_version + ' estimates, calibrated only from this snapshot’s live-token set.'));
     s.appendChild(summary);
-    var widths = d.band_width_multipliers;
-    var basis = d.calibration_backtest.by_basis;
-    var bias = d.selection_shrink.bias_log;
+    var widths = d.band_width_multipliers, basis = d.calibration_backtest.by_basis, bias = d.selection_shrink.bias_log;
     var biasText = 'The predicted top 10 ran ' + (bias >= 0 ? 'high' : 'low') + ' by a median ' + Math.abs(bias).toFixed(3) + ' log points';
     var bandRatios = d.rows.map(function(row) { return row.value_high_usd / row.value_low_usd; }).sort(function(a, b) { return a - b; });
     var boardMedianBandRatio = bandRatios.length % 2 ? bandRatios[(bandRatios.length - 1) / 2] : (bandRatios[bandRatios.length / 2 - 1] + bandRatios[bandRatios.length / 2]) / 2;
@@ -508,20 +498,18 @@
     });
     nav.appendChild(close);
     s.tabIndex = -1;
-    s.setAttribute('role', 'dialog');
-    s.setAttribute('aria-modal', 'true');
-    s.setAttribute('aria-label', r.name);
-    s.append(nav, el('h2', '', r.name), grade(r.confidence, gradeMeaning(d, r.confidence)), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
+    attrs(s, { role: 'dialog', 'aria-modal': 'true', 'aria-label': r.name });
+    s.append(nav, el('h2', '', r.name), grade(d, r), el('p', 'detail-value', usd(r.implied_value_usd) + ' implied value · ' + usd(r.value_low_usd) + '–' + usd(r.value_high_usd) + ' band'));
     s.appendChild(el('p', 'rank-range', 'Rank ' + r.rank + ' · plausible range ' + r.rank_low + '–' + r.rank_high + ' from ' + d.resample_count + ' calibration-set resamples, with growth and maturity factors held fixed'));
     if (d.validation) s.appendChild(valLine(d.validation));
     s.appendChild(facts([['Category', category(r)], ['TVL', usd(r.tvl_usd)], ['Implied value ÷ TVL', estTvl(r)], ['7-day growth multiplier', r.growth_multiplier], ['Maturity multiplier', r.maturity_multiplier]]));
     var take = el('div', 'what-takes');
     take.append(el('h3', '', 'What it takes'));
-    var fe = farmCost(r.plan_weeks);
-    take.appendChild(facts([['Plan capital', usd(r.plan_capital_usd)], ['Time span', r.plan_weeks + ' weeks'], ['Step executions', fe.runs], ['Hours', fe.hours], ['Cost, gas + time', usd(fe.low) + '–' + usd(fe.high)]]));
+    var c = r.chains[0], fe = farmCost(r.plan_weeks, c);
+    take.appendChild(facts([['Plan capital', usd(r.plan_capital_usd)], ['Time span', r.plan_weeks + ' weeks'], ['Step executions', fe.runs], ['Hours', fe.hours], ['Cost, fees + time', usd(fe.low) + '–' + usd(fe.high)]]));
     var share = d.calibration.filter(function (x) { return x.category === category(r); })[0];
     take.appendChild(note(share ? 'Tokenized peers, by protocol count: ' + share.peer_tokenized_count + ' of ' + share.peer_total_count + ' ' + category(r) + ' protocols record a token' : 'Tokenized peers, by TVL share (this category has no calibration set, so no protocol count): ' + pct(r.peer_token_share) + ' of ' + category(r) + ' TVL sits in protocols that record a token'));
-    take.appendChild(note('Assumed, not snapshot data: gas $' + FARM.gas[0] + '-$' + FARM.gas[1] + ' and ' + FARM.minutes + ' minutes per step, time at $' + FARM.hourly + '/hour.'));
+    take.appendChild(note('Assumed, not snapshot data: per-chain fees $' + fe.gas[0] + '-$' + fe.gas[1] + ' on ' + c + ' and ' + FARM.minutes + ' minutes per step, time at $' + FARM.hourly + '/hour.'));
     s.appendChild(take);
     var steps = el('ol', 'steps');
     r.farm_steps.forEach(function (x) { x = x.split(/ (?=Cost: )/); steps.appendChild(el('li', '', x[0])).appendChild(el('small', 'cost', x[1])); });

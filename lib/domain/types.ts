@@ -58,7 +58,7 @@ export const MODEL: ModelConstants = {
   global_excluded_categories: ['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX'],
   peer_token_share: 'TVL with positive market cap / total category TVL; detail reports protocol counts',
   chain_factor: 'none (tested against the live set; no relation)',
-  farm_plan_totals: 'capital=initial prescribed principal; fees=step executions (one-off steps once, weekly steps once per activity week) x the midpoint of the assumed per-step gas range; weeks=4 or 8 activity span',
+  farm_plan_totals: 'capital=initial prescribed principal; fees=step executions (one-off steps once, weekly steps once per activity week) x the midpoint of the assumed per-step gas range of the primary chain of the row; weeks=4 or 8 activity span',
   minimum_implied_value_usd: 1,
   board_max_rows: 200,
   early_rows: 160,

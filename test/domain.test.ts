@@ -13,7 +13,7 @@ import { calibrate } from '../lib/domain/calibration.ts';
 import { adjustLogRatio, ageDays, changePercentiles, estimate, growthFactor, maturityFactor, BASELINE_SHAPES } from '../lib/domain/estimate.ts';
 import { effectiveShrinkageK } from '../lib/domain/estimate.ts';
 import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest, categoryMedianLooErrors, errorMetric, olsLooErrors, residualBandCoverage, walkForward, walkForwardSplit } from '../lib/domain/backtest.ts';
-import { FARM_ASSUMPTIONS, farmEconomics, farmGroup, farmSteps, farmTotals, stepExecutions, stepText } from '../lib/domain/farmplan.ts';
+import { CHAIN_GAS, FARM_ASSUMPTIONS, GAS_OTHER, chainGas, chainKind, farmEconomics, farmGroup, farmSteps, farmTotals, stepExecutions, stepText } from '../lib/domain/farmplan.ts';
 import { boardIssue } from '../lib/domain/board.ts';
 import { buildBoard } from '../lib/domain/board.ts';
 import { rankRanges } from '../lib/domain/uncertainty.ts';
@@ -210,9 +210,12 @@ test('estimate orders bands, preserves asymmetric quartiles, and centers neutral
 test('farm plan fees are step executions x the gas midpoint every step states, and weeks stay bounded', () => {
   const short = farmTotals(protocol({ tvl_usd: 50 }), 20);
   const long = farmTotals(protocol({ tvl_usd: 50 }), 500);
-  // Five one-off steps and one weekly step: 5 + 8 and 5 + 4 executions at the $1-$8 midpoint.
+  // Five one-off steps and one weekly step: 5 + 8 and 5 + 4 executions at the midpoint of Ethereum's $1-$8.
   assert.deepEqual(short, { capital: 50, fees: (5 + 8) * 4.5, weeks: 8 });
   assert.deepEqual(long, { capital: 50, fees: (5 + 4) * 4.5, weeks: 4 });
+  // The midpoint is the row's own chain's: Solana's $0.001-$0.05, and the fallback range for an unlisted chain.
+  assert.deepEqual(farmTotals(protocol({ tvl_usd: 50, chains: ['Solana'] }), 500), { capital: 50, fees: 9 * (.001 + .05) / 2, weeks: 4 });
+  assert.equal(farmTotals(protocol({ tvl_usd: 50, chains: ['Nowhere'] }), 500).fees, 9 * (GAS_OTHER[0] + GAS_OTHER[1]) / 2);
   assert.ok(short.weeks >= 4 && short.weeks <= 8);
   assert.ok(long.weeks >= 4 && long.weeks <= 8);
 });
@@ -223,14 +226,19 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
   const branches: [string | null, string, RegExp, RegExp][] = [
     ['Lending', 'lending', /make a small borrow and repay it/, /liquidation threshold, health factor/],
     ['CDP', 'CDP', /mint a small amount of debt against it and repay it/, /collateral ratio, liquidation ratio/],
-    ['Derivatives', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
-    ['Perpetuals', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
-    ['Options', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Derivatives', 'perps/derivatives', /margin asset .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Perpetuals', 'perps/derivatives', /margin asset .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Options', 'perps/derivatives', /margin asset .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
     ['Dexs', 'DEX/swap', /add a balanced portion of both to the liquidity pool/, /estimate the impermanent loss/],
     ['Indexes', 'index', /index token .* through the app/, /check what it holds/],
     ['Yield Aggregator', 'yield', /keep the receipt token in the same wallet/, /which strategy the .* runs/],
-    ['Liquid Staking', 'staking', /keep the receipt token in the same wallet/, /lockup and unbonding period/],
-    ['Risk Curators', 'curator/vault', /into one .* vault on/, /slashing terms and curator permissions/],
+    ['Liquid Staking', 'staking', /keep any receipt token in the same wallet/, /lockup and unbonding period/],
+    ['Risk Curators', 'curator/vault', /into one .* vault on/, /the curator's permissions .* its caps/],
+    ['Restaking', 'restaking/collateral', /restaking or collateral vaults/, /slashing conditions that apply/],
+    ['Collateral Markets', 'restaking/collateral', /restaking or collateral vaults/, /slashing conditions that apply/],
+    ['Uncollateralized Lending', 'uncollateralized lending', /the plan only lends/, /if a borrower defaults/],
+    ['Interest Rate Derivatives', 'interest-rate derivatives', /fixed-rate position/, /maturity dates, the implied rate/],
+    ['Staking Pool', 'staking', /keep any receipt token in the same wallet/, /lockup and unbonding period/],
     ['Cross Chain Bridge', 'bridge/cross-chain', /to a second supported chain/, /check the fee quote and expected arrival time/],
     ['RWA', 'RWA', /tokenized real-world-asset product/, /the minimum subscription, the redemption window/],
     ['Onchain Capital Allocator', 'onchain capital allocator', /into its deposit product/, /allocates deposited capital/],
@@ -242,7 +250,7 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
     ['Decentralized BTC', 'BTC', /BTC token through its app/, /redemption back to native BTC/],
     ['Dual-Token Stablecoin', 'stablecoin', /Mint or wrap .* stablecoin/, /what backs/],
     ['Stablecoin Wrapper', 'stablecoin', /Mint or wrap .* stablecoin/, /what backs/],
-    ['Chain', 'chain', /through its official bridge, then make one swap/, /official bridge from its own website/],
+    ['Chain', 'chain', /through its official bridge, then make one swap or transfer/, /official bridge from its own website/],
     ['CeDeFi', 'CeDeFi', /on-chain product .* dedicated wallet/, /which part of .* is custodial/],
     ['Crypto Card Issuer', 'card', /Top up your .* card/, /card fees and spending limits/],
     ['Governance Incentives', 'governance incentives', /direct its vote or incentives/, /pays incentives/],
@@ -254,6 +262,8 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
   ];
   const shapes: Partial<SnapshotProtocol>[] = [
     { name: 'Alpha', chains: ['Ethereum'], tvl_usd: 5e7 },
+    { name: 'Sol', chains: ['Solana'], tvl_usd: 5e7 },
+    { name: 'Sat', chains: ['Bitcoin', 'Ethereum'], tvl_usd: 3e8 },
     { name: 'B', chains: [], tvl_usd: 2e8 },
     { name: 'Gamma Protocol', chains: ['Ethereum', 'Arbitrum', 'Base', 'Optimism', 'Polygon', 'BSC', 'Avalanche', 'Solana'], tvl_usd: 2e9 },
     { name: 'N'.repeat(300), chains: ['C'.repeat(200)], tvl_usd: 6e9 }
@@ -280,8 +290,11 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
           const weeks = age !== null && age < 365 ? 8 : 4;
           assert.ok(steps[3]!.startsWith(`Once a week for ${weeks} weeks: `) && steps[3]!.endsWith(`Time: ${FARM_ASSUMPTIONS.minutes_per_step} minutes each week, ${weeks} times.`), label);
           assert.deepEqual(plan.map(x => x.weekly === true), [false, false, false, true, false, false], label);
-          // One deposit figure: every dollar amount other than the gas range and the $1 peg is the plan capital.
-          const amounts = new Set(steps.join(' ').match(/\$\d+(?=[ ,.;)])/g)!.filter(x => !['$0', '$1', '$8'].includes(x)));
+          // One deposit figure: every dollar amount other than the chain's fee range, $0 and the $1 peg is the plan capital.
+          const [low, high] = chainGas(p.chains[0]), fee = `about $${low}-$${high} on `;
+          assert.ok(steps.every(step => step.includes(fee)), label);
+          const rest = steps.join(' ').split(fee).join(' ');
+          const amounts = new Set(rest.match(/\$\d+(?:\.\d+)?(?=[ ,.;)-])/g)!.filter(x => !['$0', '$1'].includes(x)));
           assert.deepEqual([...amounts], [`$${farmTotals(p, age).capital}`], label);
           // The stated times sum to the plan's hours.
           const minutes = steps.reduce((sum, step) => { const m = / Time: (\d+) minutes(?: each week, (\d+) times)?\.$/.exec(step)!; return sum + Number(m[1]) * Number(m[2] ?? 1); }, 0);
@@ -293,7 +306,7 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
     }
   }
   // The over-long shape really does exercise the cut, and a too-short step is padded up to the minimum.
-  assert.ok(farmSteps(protocol(shapes[3]), null).map(stepText).some(step => step.length === 599 && step.endsWith('...')));
+  assert.ok(farmSteps(protocol(shapes.at(-1)), null).map(stepText).some(step => step.length === 599 && step.endsWith('...')));
   assert.equal('G Cost: 0. Time: 1.'.length, 19);
   const padded = stepText({ text: 'G', cost: '0', time: '1' });
   assert.ok(padded.length >= 20 && padded.startsWith('G Cost: 0. Time: 1.'));
@@ -835,7 +848,7 @@ const hasClass = (name: string) => (n: DomNode) => String(n.className).split(' '
 type DashRow = Record<string, any>;
 type DashView = { rows: DashRow[]; top: DashRow[]; shortlist: DashRow[]; grades: Record<string, number>; sort: string; direction: number; data: Record<string, any> };
 type Dashboard = {
-  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode; validation(d: unknown): DomNode; header(d: unknown): DomNode; chain(M: any, r: any, p: number): Record<string, any>; farm: { steps: [string, number][]; gas: number[]; minutes: number; hourly: number }; farmCost(weeks: number): { runs: number; hours: number; fees: number; low: number; high: number } };
+  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode; validation(d: unknown): DomNode; header(d: unknown): DomNode; chain(M: any, r: any, p: number): Record<string, any>; farm: { steps: [string, number][]; gas: Record<string, number[]>; minutes: number; hourly: number }; farmCost(weeks: number, chain: string): { runs: number; hours: number; gas: number[]; fees: number; low: number; high: number } };
   State: { compute(): DashView; update(patch: Record<string, unknown>): DashView; sortBy(key: string): DashView };
 };
 const loadDashboard = (radar: unknown, model?: unknown): Dashboard => {
@@ -1135,11 +1148,12 @@ test('audit strip, row age-band tooltip and farm economics render from data; no 
       const fact = (label: string) => facts[facts.indexOf(label) + 1];
       assert.equal(fact('Step executions'), String(fe.step_executions));
       assert.equal(fact('Hours'), String(fe.hours));
-      assert.equal(fact('Cost, gas + time'), `${UI.usd(fe.cost_usd_low)}–${UI.usd(fe.cost_usd_high)}`);
+      assert.equal(fact('Cost, fees + time'), `${UI.usd(fe.cost_usd_low)}–${UI.usd(fe.cost_usd_high)}`);
       // Fix 24: one cost answer; the plan-fee midpoint and the cost share of implied value are no longer shown.
       assert.ok(!facts.includes('Plan fees') && !facts.includes('Cost / implied value'), facts.join('|'));
       const text = detail.textContent;
-      assert.ok(text.includes(`Assumed, not snapshot data: gas $${fa.gas_usd_per_step_low}-$${fa.gas_usd_per_step_high} and ${fa.minutes_per_step} minutes per step, time at $${fa.value_of_time_usd_per_hour}/hour.`));
+      const g = (fa.gas_usd_per_step_by_chain.find((t: any) => t.chains.includes(r.chains[0])) ?? { usd: fa.gas_usd_per_step_other_chains }).usd;
+      assert.ok(text.includes(`Assumed, not snapshot data: per-chain fees $${g[0]}-$${g[1]} on ${r.chains[0]} and ${fa.minutes_per_step} minutes per step, time at $${fa.value_of_time_usd_per_hour}/hour.`), r.slug);
       assert.ok(!/break.even|pro rata/i.test(text));
     }
   };
@@ -1349,7 +1363,11 @@ test('farm economics is the stated arithmetic on its assumptions, and leaves the
   for (const age of [20, 500]) assert.equal(farmEconomics(p, age).step_executions, stepExecutions(farmSteps(p, age), farmTotals(p, age).weeks));
   assert.equal(stepExecutions([{ text: 'a', cost: 'b', time: 'c' }, { text: 'a', cost: 'b', time: 'c', weekly: true }, { text: 'a', cost: 'b', time: 'c', weekly: true }], 8), 17);
   assert.equal(farmEconomics(p, 500).hours, 9 * FARM_ASSUMPTIONS.minutes_per_step / 60);
-  assert.ok(FARM_ASSUMPTIONS.gas_usd_per_step_low < FARM_ASSUMPTIONS.gas_usd_per_step_high && /assumption/.test(FARM_ASSUMPTIONS.label));
+  assert.ok(FARM_ASSUMPTIONS.gas_usd_per_step_by_chain.every(t => t.usd[0] < t.usd[1]) && /assumption/.test(FARM_ASSUMPTIONS.label));
+  // With no override, a row is costed on its own chain's range.
+  assert.deepEqual([farmEconomics(p, 500).gas_usd_low, farmEconomics(p, 500).gas_usd_high], [9 * 1, 9 * 8]);
+  const sol = farmEconomics(protocol({ chains: ['Solana'] }), 500);
+  assert.deepEqual([sol.gas_usd_low, sol.gas_usd_high], [9 * .001, 9 * .05]);
   assert.deepEqual(farmTotals(p, 500), { capital: 50, fees: 9 * 4.5, weeks: 4 });
 });
 
@@ -1610,22 +1628,26 @@ test('sealed data: chain() reproduces implied_value_usd exactly for every board 
 test('the dashboard\'s farm rules reproduce lib\'s farm figures', t => {
   const { UI } = loadDashboard(dashboardFixtureRadar());
   const F = JSON.parse(JSON.stringify(UI.farm));
-  assert.deepEqual([F.gas, F.minutes, F.hourly], [[FARM_ASSUMPTIONS.gas_usd_per_step_low, FARM_ASSUMPTIONS.gas_usd_per_step_high], FARM_ASSUMPTIONS.minutes_per_step, FARM_ASSUMPTIONS.value_of_time_usd_per_hour]);
+  assert.deepEqual([F.minutes, F.hourly], [FARM_ASSUMPTIONS.minutes_per_step, FARM_ASSUMPTIONS.value_of_time_usd_per_hour]);
+  // The per-chain table: every chain lib lists, and an unlisted or missing chain, get the same range in the dashboard.
+  for (const chain of [...CHAIN_GAS.flatMap(t => t.chains), 'Nowhere', undefined]) assert.deepEqual(JSON.parse(JSON.stringify(UI.farmCost(4, chain as string).gas)), chainGas(chain), String(chain));
   const check = (p: SnapshotProtocol, age: number | null) => {
-    const steps = farmSteps(p, age), totals = farmTotals(p, age), mine = UI.farmCost(totals.weeks), lib = farmEconomics(p, age);
+    const steps = farmSteps(p, age), totals = farmTotals(p, age), mine = UI.farmCost(totals.weeks, p.chains[0]!), lib = farmEconomics(p, age);
     assert.equal(F.steps.length, steps.length);
     assert.deepEqual(F.steps.map((x: [string, number]) => !!x[1]), steps.map(x => !!x.weekly));
     assert.deepEqual([mine.runs, mine.hours, mine.fees, mine.low, mine.high], [stepExecutions(steps, totals.weeks), lib.hours, totals.fees, lib.cost_usd_low, lib.cost_usd_high]);
   };
   check(protocol(), 30);
   check(protocol({ category: 'Dexs' }), 900);
+  check(protocol({ category: 'Yield', chains: ['Solana'] }), 30);
+  check(protocol({ category: 'Payments', chains: ['Bitcoin'] }), 900);
   // The worked-example protocol, then every sealed row against the farm figures the build emitted.
   const snap = sealedSnapshot(), radar = sealedRadar();
   if (!snap || !radar) return t.diagnostic('sealed snapshot or out/data.js not found: worked example not checked');
   const top = radar.rows.find((r: any) => r.rank === 1), p = snap.protocols.find(x => x.slug === top.slug)!;
   check(p, ageDays(snap.as_of, p.listed_at));
   for (const r of radar.rows) {
-    const mine = UI.farmCost(r.plan_weeks), fe = r.farm_economics;
+    const mine = UI.farmCost(r.plan_weeks, r.chains[0]), fe = r.farm_economics;
     assert.deepEqual([mine.runs, mine.hours, mine.low, mine.high, mine.fees], [fe.step_executions, fe.hours, fe.cost_usd_low, fe.cost_usd_high, r.plan_fees_usd], r.slug);
   }
 });
@@ -1806,4 +1828,87 @@ test('Start here and the launch-context table say what they count', t => {
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed wording not checked');
   check(sealed);
+});
+
+// ---- radar-21 fix 38: farm plans per chain and category ----
+test('every step of a plan states its own chain\'s fee range, and the table covers every primary chain of the board', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  const listed = new Set(CHAIN_GAS.flatMap(x => x.chains));
+  for (const r of radar.rows) {
+    const chain = r.chains[0], [low, high] = chainGas(chain);
+    assert.ok(listed.has(chain), `${chain} is not in CHAIN_GAS`);
+    const label = `${chainKind(chain) === 'evm' ? 'gas' : 'network fee'} about $${low}-$${high} on ${chain}`;
+    for (const step of r.farm_steps) assert.ok(step.includes(label), `${r.slug}: ${step}`);
+    assert.equal(r.plan_fees_usd, (5 + r.plan_weeks) * (low + high) / 2, r.slug);
+  }
+  // Each chain is in one tier only, and the ranges respect the chains' fee mechanics.
+  assert.equal(listed.size, CHAIN_GAS.reduce((n, x) => n + x.chains.length, 0));
+  assert.ok(chainGas('Ethereum')[0] > chainGas('Base')[1] && chainGas('Ethereum')[0] > chainGas('Arbitrum')[1], 'L1 Ethereum above L2s');
+  assert.ok(chainGas('Solana')[1] <= .05, 'Solana near zero');
+  t.diagnostic(`${radar.rows.length} rows across ${new Set(radar.rows.map((r: any) => r.chains[0])).size} primary chains`);
+});
+
+test('no step on a non-EVM chain mentions token approvals or gas', t => {
+  const categories = ['Lending', 'Dexs', 'Risk Curators', 'Restaking', 'Collateral Markets', 'Derivatives', 'Anchor BTC', 'Payments', 'Chain', 'Yield', 'CDP', null];
+  for (const chain of ['Solana', 'Bitcoin', 'Stellar', 'Ripple', 'Sui', 'Tron', 'Hyperliquid L1', 'Starknet', 'Nowhere']) {
+    assert.notEqual(chainKind(chain), 'evm', chain);
+    for (const category of categories) for (const step of farmSteps(protocol({ category, chains: [chain] }), 30).map(stepText)) assert.ok(!/approv|\bgas\b/i.test(step), `${chain} / ${category}: ${step}`);
+  }
+  // EVM rows keep the approval step; Solana and Bitcoin rows get their own first action.
+  assert.match(stepText(farmSteps(protocol({ chains: ['Base'] }), 30)[0]!), /approve only the amount/);
+  assert.match(stepText(farmSteps(protocol({ chains: ['Solana'] }), 30)[0]!), /preview of each transaction/);
+  assert.match(stepText(farmSteps(protocol({ chains: ['Bitcoin'] }), 30)[0]!), /Bitcoin wallet .* Lightning/);
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  let nonEvm = 0;
+  for (const r of radar.rows) if (chainKind(r.chains[0]) !== 'evm') { nonEvm++; for (const step of r.farm_steps) assert.ok(!/approv|\bgas\b/i.test(step), `${r.slug}: ${step}`); }
+  t.diagnostic(`${nonEvm} sealed rows on non-EVM chains, none mentions approvals or gas`);
+});
+
+test('step 5 and the exit follow the category: distinct across the major groups, no universal governance vote', t => {
+  const groups: [string, RegExp][] = [
+    ['Lending', /supply part of the same .* second asset/], ['CDP', /stability or borrow fee/], ['Dexs', /swap .* second pair/], ['Derivatives', /limit order/],
+    ['Risk Curators', /vault's current allocation/], ['Restaking', /networks or operators/], ['Yield', /compare the yield/], ['RWA', /NAV or attestation/],
+    ['Onchain Capital Allocator', /moved the deposited capital/], ['Basis Trading', /funding rates/], ['Staking Pool', /validator or pool performance/], ['Chain', /if .* runs a points or testnet programme/]
+  ];
+  const once = groups.map(([category, re]) => {
+    const step = farmSteps(protocol({ category }), 30)[4]!.text;
+    assert.match(step, re, category);
+    assert.ok(step.startsWith('Once during the plan, '), category);
+    return step;
+  });
+  assert.equal(new Set(once).size, groups.length);
+  // A vote appears only conditionally ("if ... runs a vote").
+  for (const step of once) if (/\bvote\b/.test(step)) assert.match(step, /\bif\b/, step);
+  // Exits by mechanics: repay before withdrawing, queues for restaking, close positions before withdrawing margin.
+  const exit = (category: string) => farmSteps(protocol({ category }), 30)[5]!.text;
+  assert.match(exit('Lending'), /repay every borrow in full first, then withdraw/);
+  assert.match(exit('CDP'), /repay all minted debt first, then withdraw the collateral/);
+  assert.match(exit('Restaking'), /withdrawal queue or epoch/);
+  assert.match(exit('Collateral Markets'), /withdrawal queue or epoch/);
+  assert.match(exit('Derivatives'), /close every open position, then withdraw .* margin/);
+  assert.match(exit('Risk Curators'), /queue/);
+  assert.match(exit('Dexs'), /remove the liquidity/);
+  // The two misapplications the review found: no slashing on a curator vault, no lending plan for Collateral Markets.
+  assert.ok(!farmSteps(protocol({ category: 'Risk Curators' }), 30).some(s => /slashing/.test(s.text)));
+  assert.ok(!farmSteps(protocol({ category: 'Collateral Markets' }), 30).some(s => /borrow|health factor/.test(s.text)));
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  const generic = (r: any) => r.farm_steps[4].split(r.name).join('N').split(r.chains[0]).join('C').replace(/ Cost: .*$/, '');
+  const sealed = new Set(radar.rows.map(generic));
+  t.diagnostic(`${sealed.size} distinct step-5 texts across the sealed board, with name and chain masked`);
+  assert.ok(sealed.size >= 20, String(sealed.size));
+});
+
+test('fix 38 changed only the farm fields: every other field of board.json and data.js is as built before it', t => {
+  // sha256 of the rows (and, for data.js, the whole radar) with farm_steps, plan_fees_usd, farm_economics,
+  // farm_assumptions and model.farm_plan_totals removed, taken from the build at commit bb3ea20, before fix 38.
+  const h = (x: unknown) => createHash('sha256').update(JSON.stringify(x)).digest('hex');
+  const strip = ({ farm_steps, plan_fees_usd, farm_economics, ...rest }: Record<string, any>) => rest;
+  const boardPath = new URL('../out/board.json', import.meta.url), radar = sealedRadar();
+  if (!existsSync(boardPath) || !radar) return t.diagnostic('out/ not built: board diff not checked');
+  assert.equal(h(JSON.parse(readFileSync(boardPath, 'utf8')).rows.map(strip)), '2cec83b9f7ae261e3490275eb459fcde99d51ba0093bdc2e1900fdc20301ca63');
+  const { farm_assumptions, model: { farm_plan_totals, ...model }, rows, ...rest } = JSON.parse(JSON.stringify(radar));
+  assert.equal(h({ ...rest, model, rows: rows.map(strip) }), 'b966460c2e04a1ae111951ecd738f21f0eb8165abeab8f808a2f1c0513615fa5');
 });
