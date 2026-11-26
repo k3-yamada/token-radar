@@ -4,6 +4,9 @@ import { adjustLogRatio, estimateCentre, type CentreEstimator } from './estimate
 
 const DERIVATIVE = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 
+/** The default winsor bounds, as fractions of the global log-ratio distribution. `calibrate` reports the pair it used as `winsor`. */
+export const WINSOR_DEFAULT: [number, number] = [.01, .99];
+
 export interface CalibrationOptions { exclusions?: string[]; winsor?: [number, number]; adjustGlobal?: boolean }
 export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; center: number; quad?: number }, centreEstimator: CentreEstimator = 'median', options: CalibrationOptions = {}): Calibration {
   const excluded = new Set(options.exclusions ?? [...DERIVATIVE]);
@@ -21,7 +24,7 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
   const globalLogs = globalRows.map(p => options.adjustGlobal
     ? adjustLogRatio(Math.log(p.mcap_usd! / p.tvl_usd), Math.log(p.tvl_usd), sizeAdjustment?.center ?? 0, sizeAdjustment ? -sizeAdjustment.slope : 0, sizeAdjustment ? -(sizeAdjustment.quad ?? 0) : 0)
     : Math.log(p.mcap_usd! / p.tvl_usd));
-  const [lowP, highP] = options.winsor ?? [.01, .99];
+  const [lowP, highP] = options.winsor ?? WINSOR_DEFAULT;
   const lower = lowP === 0 ? -Infinity : quantile(globalLogs, lowP);
   const upper = highP === 1 ? Infinity : quantile(globalLogs, highP);
   const clamp = (value: number) => Math.max(lower, Math.min(upper, value));
@@ -90,6 +93,7 @@ export function calibrate(snapshot: Snapshot, sizeAdjustment?: { slope: number; 
     entries,
     medianChange: median(snapshot.protocols.map(p => p.change_7d).filter((v): v is number => v !== null)),
     peerCounts,
-    samples
+    samples,
+    winsor: [lowP, highP]
   };
 }

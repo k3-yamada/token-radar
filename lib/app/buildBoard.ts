@@ -1,10 +1,13 @@
 import { buildBoard, boardIssue } from '../domain/board.ts';
 import { calibrate } from '../domain/calibration.ts';
 import { MODEL, MODEL_VERSION, type BoardRow, type LiveRow, type RadarData, type RadarRow, type Snapshot } from '../domain/types.ts';
-import { rankRanges } from '../domain/uncertainty.ts';
-import { calibrateBacktest, factorChangeReport, gradeForBandRatio, summarizeBacktest, summarizeGradeBands, globalSizeAdjustment, selectionDiagnostics } from '../domain/backtest.ts';
+import { rankRanges, RESAMPLE_COUNT } from '../domain/uncertainty.ts';
+import { calibrateBacktest, factorChangeReport, gradeForBandRatio, GRADE_RULES, summarizeBacktest, summarizeGradeBands, globalSizeAdjustment, selectionDiagnostics, validationReport } from '../domain/backtest.ts';
 import { median } from '../domain/statistics.ts';
 import { BASELINE_SHAPES } from '../domain/estimate.ts';
+import { launchContext } from '../domain/launchContext.ts';
+import { integrityAudit } from '../domain/audit.ts';
+import { FARM_ASSUMPTIONS, farmEconomics } from '../domain/farmplan.ts';
 
 /** The part of `factorChangeReport` that `buildRadar` acts on; injectable so a regression can force an adoption decision. */
 export type FactorDecision = Pick<ReturnType<typeof factorChangeReport>, 'adopted_amplitudes' | 'adopted_unknown_age' | 'amplitudes' | 'unknownAge'>;
@@ -15,7 +18,8 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
   const adoptedAmplitudes = factorReport.adopted_amplitudes ? factorReport.amplitudes : undefined;
   const unknownAge = factorReport.adopted_unknown_age ? factorReport.unknownAge : MODEL.unknown_listed_age_days;
   const calibration = calibrate(snapshot, sizeAdjustment);
-  const modelCalibration = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: sizeAdjustment.slope }, { fitAmplitudes: !!adoptedAmplitudes, derivedUnknownAge: factorReport.adopted_unknown_age });
+  const variants = { fitAmplitudes: !!adoptedAmplitudes, derivedUnknownAge: factorReport.adopted_unknown_age };
+  const modelCalibration = calibrateBacktest(snapshot, BASELINE_SHAPES, { mode: 'global', slope: sizeAdjustment.slope }, variants);
   const diagnostics = selectionDiagnostics(modelCalibration.observations);
   const top10Bias = diagnostics.winner_curse.top10.top.median_log_error;
   const top10Obs = [...modelCalibration.observations].sort((a, b) => b.predictedValue - a.predictedValue || a.slug.localeCompare(b.slug)).slice(0, 10);
@@ -69,6 +73,7 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
     change_7d: p.change_7d
   }));
   const watchlist = new Set(snapshot.watchlist);
+  const protocolBySlug = new Map(snapshot.protocols.map(p => [p.slug, p]));
   const rows: RadarRow[] = board.map(r => ({
     rank: r.rank,
     rank_low: r.rank_low,
@@ -99,7 +104,9 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
     peer_token_share: r.peer_token_share,
     plan_capital_usd: r.plan_capital_usd,
     plan_fees_usd: r.plan_fees_usd,
-    plan_weeks: r.plan_weeks
+    plan_weeks: r.plan_weeks,
+    // Context for the plan, derived from FARM_ASSUMPTIONS; it feeds no value, rank or grade.
+    farm_economics: farmEconomics(protocolBySlug.get(r.slug)!, r.age_days, r.implied_value_usd)
   }));
 
   // Both clauses follow the adoption decisions acted on above, so the emitted description never claims a derivation or
@@ -115,6 +122,10 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
       floor_usd: snapshot.floor_usd,
       model: { ...MODEL, unknown_listed_age_days: unknownAge, factor_normalization: `growth: 1 + 0.35 * (2 * percentile - 1); maturity: 0.75 + 0.5 * ln(1 + age_days) / ln(1 + 1460); ${amplitudeClause}factors are median-normalized across scored rows; ${unknownAgeClause}`, growth_median_change_7d: calibration.medianChange },
       model_version: MODEL_VERSION,
+      grade_rules: GRADE_RULES,
+      resample_count: RESAMPLE_COUNT,
+      // The bounds the board's calibration reports having used, as percentiles (0.01 -> 1); rounded to shed float noise.
+      winsor_percentiles: [Math.round(calibration.winsor[0] * 1e6) / 1e4, Math.round(calibration.winsor[1] * 1e6) / 1e4],
       watchlist_size: snapshot.watchlist.length,
       board_size: board.length,
       early_size: board.filter(r => !watchlist.has(r.slug)).length,
@@ -138,7 +149,11 @@ export function buildRadar(snapshot: Snapshot, options: { forceShrinkAdopted?: b
       ...(adoptedAmplitudes ? { fitted_factor_amplitudes: { growth: adoptedAmplitudes.growth, maturity: adoptedAmplitudes.maturity } } : {}),
       // Always the unknown age in use (derived when adopted, else the MODEL default), so the dashboard never reads undefined.
       derived_unknown_listed_age_days: unknownAge,
-      top20_jackknife_overlap: top20JackknifeOverlap
+      top20_jackknife_overlap: top20JackknifeOverlap,
+      validation: validationReport(snapshot, modelCalibration, sizeAdjustment.slope, variants),
+      launchContext: launchContext(snapshot, board),
+      farm_assumptions: FARM_ASSUMPTIONS,
+      audit: integrityAudit(snapshot, board)
     },
     rejection
   };

@@ -1,17 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { median, quantile } from '../lib/domain/statistics.ts';
-import { isPreToken, isRankable, selectScoredRows } from '../lib/domain/eligibility.ts';
+import { exclusionReason, isPreToken, isRankable, selectScoredRows } from '../lib/domain/eligibility.ts';
+import { ageBand, launchContext } from '../lib/domain/launchContext.ts';
+import { BEYOND_ROW_LIMIT, integrityAudit } from '../lib/domain/audit.ts';
 import { calibrate } from '../lib/domain/calibration.ts';
 import { adjustLogRatio, ageDays, changePercentiles, estimate, growthFactor, maturityFactor, BASELINE_SHAPES } from '../lib/domain/estimate.ts';
 import { effectiveShrinkageK } from '../lib/domain/estimate.ts';
-import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest } from '../lib/domain/backtest.ts';
-import { farmSteps, farmTotals, stepText } from '../lib/domain/farmplan.ts';
+import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest, categoryMedianLooErrors, errorMetric, olsLooErrors, residualBandCoverage, walkForward, walkForwardSplit } from '../lib/domain/backtest.ts';
+import { FARM_ASSUMPTIONS, farmEconomics, farmGroup, farmSteps, farmTotals, stepExecutions, stepText } from '../lib/domain/farmplan.ts';
 import { boardIssue } from '../lib/domain/board.ts';
 import { buildBoard } from '../lib/domain/board.ts';
 import { rankRanges } from '../lib/domain/uncertainty.ts';
@@ -204,30 +206,50 @@ test('estimate orders bands, preserves asymmetric quartiles, and centers neutral
   assert.notEqual(result.centre - result.q25, result.q75 - result.centre);
 });
 
-test('farm plan fees are the exact sum of step-range midpoints and weeks stay bounded', () => {
+test('farm plan fees are step executions x the gas midpoint every step states, and weeks stay bounded', () => {
   const short = farmTotals(protocol({ tvl_usd: 50 }), 20);
   const long = farmTotals(protocol({ tvl_usd: 50 }), 500);
-  assert.deepEqual(short, { capital: 50, fees: 3 + 7 + 4.5 + 4.5 * 8 + 1.5 + 6 + 6.5, weeks: 8 });
-  assert.deepEqual(long, { capital: 50, fees: 3 + 7 + 4.5 + 4.5 * 4 + 1.5 + 6 + 6.5, weeks: 4 });
+  // Five one-off steps and one weekly step: 5 + 8 and 5 + 4 executions at the $1-$8 midpoint.
+  assert.deepEqual(short, { capital: 50, fees: (5 + 8) * 4.5, weeks: 8 });
+  assert.deepEqual(long, { capital: 50, fees: (5 + 4) * 4.5, weeks: 4 });
   assert.ok(short.weeks >= 4 && short.weeks <= 8);
   assert.ok(long.weeks >= 4 && long.weeks <= 8);
 });
 
 test('farm plans keep the board contract in every category branch: 3-12 steps of 20-600 characters', () => {
   // [category, a phrase only that branch's action step prints, a phrase only its risk step prints]
-  const branches: [string | null, RegExp, RegExp][] = [
-    ['Lending', /make a small borrow and repay it/, /liquidation thresholds and health factor/],
-    ['CDP', /make a small borrow and repay it/, /liquidation thresholds and health factor/],
-    ['Derivatives', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
-    ['Perpetuals', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
-    ['Options', /as margin on .* open a small low-leverage hedge/, /review smart-contract permissions/],
-    ['Dexs', /add a balanced portion to one active liquidity pool/, /estimate impermanent loss/],
-    ['Yield Aggregator', /keep the receipt token in the same wallet/, /review smart-contract permissions/],
-    ['Liquid Staking', /keep the receipt token in the same wallet/, /lockup and unbonding period/],
-    ['Risk Curators', /keep the receipt token in the same wallet/, /slashing terms and curator permissions/],
-    ['Cross Chain Bridge', /to a second supported chain/, /review smart-contract permissions/],
-    ['Prediction Market', /deposit or other supported on-chain action/, /review smart-contract permissions/],
-    [null, /deposit or other supported on-chain action/, /review smart-contract permissions/]
+  // [category, template group, a phrase only that branch's deposit step prints, a phrase only its risk step prints]
+  const branches: [string | null, string, RegExp, RegExp][] = [
+    ['Lending', 'lending', /make a small borrow and repay it/, /liquidation threshold, health factor/],
+    ['CDP', 'CDP', /mint a small amount of debt against it and repay it/, /collateral ratio, liquidation ratio/],
+    ['Derivatives', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Perpetuals', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Options', 'perps/derivatives', /as margin on .* open a small low-leverage hedge/, /leverage limits, liquidation rules and trading and funding fees/],
+    ['Dexs', 'DEX/swap', /add a balanced portion of both to the liquidity pool/, /estimate the impermanent loss/],
+    ['Indexes', 'index', /index token .* through the app/, /check what it holds/],
+    ['Yield Aggregator', 'yield', /keep the receipt token in the same wallet/, /which strategy the .* runs/],
+    ['Liquid Staking', 'staking', /keep the receipt token in the same wallet/, /lockup and unbonding period/],
+    ['Risk Curators', 'curator/vault', /into one .* vault on/, /slashing terms and curator permissions/],
+    ['Cross Chain Bridge', 'bridge/cross-chain', /to a second supported chain/, /check the fee quote and expected arrival time/],
+    ['RWA', 'RWA', /tokenized real-world-asset product/, /the minimum subscription, the redemption window/],
+    ['Onchain Capital Allocator', 'onchain capital allocator', /into its deposit product/, /allocates deposited capital/],
+    ['Basis Trading', 'basis trading', /basis-trade product/, /when funding turns negative/],
+    ['Liquidity Manager', 'liquidity manager', /-managed liquidity strategy/, /the manager's fee/],
+    ['Leveraged Farming', 'leveraged farming', /leveraged farming position/, /borrow rate and liquidation rules/],
+    ['Farm', 'farm', /farm on .* LP tokens/, /how its rewards are paid/],
+    ['Anchor BTC', 'BTC', /BTC token through its app/, /redemption back to native BTC/],
+    ['Decentralized BTC', 'BTC', /BTC token through its app/, /redemption back to native BTC/],
+    ['Dual-Token Stablecoin', 'stablecoin', /Mint or wrap .* stablecoin/, /what backs/],
+    ['Stablecoin Wrapper', 'stablecoin', /Mint or wrap .* stablecoin/, /what backs/],
+    ['Chain', 'chain', /through its official bridge, then make one swap/, /official bridge from its own website/],
+    ['CeDeFi', 'CeDeFi', /on-chain product .* dedicated wallet/, /which part of .* is custodial/],
+    ['Crypto Card Issuer', 'card', /Top up your .* card/, /card fees and spending limits/],
+    ['Governance Incentives', 'governance incentives', /direct its vote or incentives/, /pays incentives/],
+    ['Insurance', 'insurance', /cover or underwriting pool/, /which events pay out/],
+    ['OTC Marketplace', 'OTC', /fill an existing listing/, /settles trades/],
+    ['Payments', 'payments', /payment through .* to a second wallet/, /fee per payment/],
+    ['Prediction Market', 'prediction market', /buy shares in one market/, /resolution rules/],
+    [null, 'default', /main on-chain product/, /who can upgrade the contracts/]
   ];
   const shapes: Partial<SnapshotProtocol>[] = [
     { name: 'Alpha', chains: ['Ethereum'], tvl_usd: 5e7 },
@@ -239,7 +261,8 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
     assert.ok(steps.length >= 3 && steps.length <= 12, `${label}: ${steps.length} steps`);
     for (const step of steps) assert.ok(step.length >= 20 && step.length <= 600, `${label}: a step of ${step.length} characters`);
   };
-  for (const [category, action, risk] of branches) {
+  for (const [category, group, action, risk] of branches) {
+    assert.equal(farmGroup(category), group, String(category));
     for (const shape of shapes) {
       for (const age of [null, 30, 364, 365, 2000]) {
         const p = protocol({ category, ...shape });
@@ -248,11 +271,20 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
         const steps = plan.map(stepText);
         assertContract(steps, label);
         for (const step of plan) assert.ok(step.text && step.cost && step.time, `${label}: a step lacks text, cost or time`);
-        // Step 2 is the category action and step 6 the category risk check; the 600-character cut can only drop a tail.
+        // Plan order: open, the risk check, then the deposit, then the weekly step; the 600-character cut can only drop a tail.
         if (p.name.length < 100) {
-          assert.match(steps[1]!, action, label);
-          assert.match(steps[5]!, risk, label);
-          assert.ok(steps[3]!.includes(`for ${age !== null && age < 365 ? 8 : 4} weeks`), label);
+          assert.match(steps[1]!, /^Before /, label);
+          assert.match(steps[1]!, risk, label);
+          assert.match(steps[2]!, action, label);
+          const weeks = age !== null && age < 365 ? 8 : 4;
+          assert.ok(steps[3]!.startsWith(`Once a week for ${weeks} weeks: `) && steps[3]!.endsWith(`Time: ${FARM_ASSUMPTIONS.minutes_per_step} minutes each week, ${weeks} times.`), label);
+          assert.deepEqual(plan.map(x => x.weekly === true), [false, false, false, true, false, false], label);
+          // One deposit figure: every dollar amount other than the gas range and the $1 peg is the plan capital.
+          const amounts = new Set(steps.join(' ').match(/\$\d+(?=[ ,.;)])/g)!.filter(x => !['$0', '$1', '$8'].includes(x)));
+          assert.deepEqual([...amounts], [`$${farmTotals(p, age).capital}`], label);
+          // The stated times sum to the plan's hours.
+          const minutes = steps.reduce((sum, step) => { const m = / Time: (\d+) minutes(?: each week, (\d+) times)?\.$/.exec(step)!; return sum + Number(m[1]) * Number(m[2] ?? 1); }, 0);
+          assert.equal(minutes / 60, farmEconomics(p, age).hours, label);
         }
         // What the board publishes for this protocol is exactly these strings.
         assert.equal(farmTotals(p, age).weeks, age !== null && age < 365 ? 8 : 4);
@@ -707,9 +739,9 @@ test('dashboard method text names the unknown-age source truthfully, adopted or 
   const empty = { count: 0, coverage: null, band_coverage: null, median_log_error: null, median_absolute_log_error: null };
   const graded = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: empty, B: measured, C: empty } }))!);
   // That sentence closes the Grades subsection, the last one, so it ends the copy.
-  assert.ok(graded.endsWith('\nIn leave-one-out backtesting, A carried 0 estimates; B carried 4 with 50.0% coverage and 2.0× error; C carried 0.'));
+  assert.ok(graded.endsWith('\nIn leave-one-out backtesting, A carried 0 estimates; B carried 4 with 50.0% coverage and ×2.0 error factor; C carried 0.'));
   const full = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: measured, B: measured, C: measured } }))!);
-  assert.ok(full.endsWith('A carried 4 estimates with 50.0% coverage and 2.0× median absolute log error; B carried 4 with 50.0% coverage and 2.0× error; C carried 4 with 50.0% coverage and 2.0× error.'));
+  assert.ok(full.endsWith('A carried 4 estimates with 50.0% coverage and ×2.0 median error factor; B carried 4 with 50.0% coverage and ×2.0 error factor; C carried 4 with 50.0% coverage and ×2.0 error factor.'));
   assert.ok(!source.includes('The 128 leave-one-out'));
   assert.ok(!source.includes('calibration set’s quartiles'));
 });
@@ -798,7 +830,7 @@ const hasClass = (name: string) => (n: DomNode) => String(n.className).split(' '
 type DashRow = Record<string, any>;
 type DashView = { rows: DashRow[]; top: DashRow[]; shortlist: DashRow[]; grades: Record<string, number>; sort: string; direction: number; data: Record<string, any> };
 type Dashboard = {
-  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode };
+  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode; validation(d: unknown): DomNode; header(d: unknown): DomNode };
   State: { compute(): DashView; update(patch: Record<string, unknown>): DashView; sortBy(key: string): DashView };
 };
 const loadDashboard = (radar: unknown): Dashboard => {
@@ -988,6 +1020,99 @@ test('detail shows the derivation step by step and labels which peer measure it 
   check(sealed);
 });
 
+// ---- Dashboard (radar-21 validation and integrity batch) ----
+test('dashboard source stays within the byte budget the dossier reader allows', () => {
+  const dir = new URL('../dashboard/', import.meta.url);
+  const total = readdirSync(dir).reduce((sum, name) => sum + statSync(new URL(name, dir)).size, 0);
+  assert.ok(total <= 61000, `dashboard source is ${total} bytes; the limit is 61,000`);
+});
+
+test('validation section renders every ablation row, the four headline figures and the age bands from data', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI } = loadDashboard(radar);
+    const v = radar.validation;
+    const section = UI.validation(radar);
+    const text = section.textContent;
+    const [ablation, bands] = all(section, n => n.tagName === 'table') as [DomNode, DomNode];
+    const cells = (table: DomNode) => all(table, n => n.tagName === 'tr').slice(1).map(tr => tr.children.map(c => c.textContent));
+    const ablationCells = cells(ablation);
+    assert.equal(ablationCells.length, v.ablation.rows.length);
+    v.ablation.rows.forEach((row: Record<string, any>, i: number) => {
+      assert.equal(ablationCells[i]![0], row.label);
+      assert.equal(ablationCells[i]![1], row.median_absolute_log_error.toFixed(4));
+      assert.equal(ablationCells[i]![2], `×${row.error_factor.toFixed(2)}`);
+      assert.equal(ablationCells[i]![3]!.includes('beats full model'), row.beats_full);
+      if (row.beats_full) assert.ok(text.includes(`${row.label} beats the full model by ${(-row.delta_vs_full).toFixed(4)}.`));
+    });
+    const tiles = all(section, hasClass('metric')).map(n => n.textContent);
+    assert.equal(tiles.length, 4);
+    assert.ok(tiles[0]!.includes(`×${v.loo.error_factor.toFixed(2)}`) && tiles[0]!.includes(v.loo.median_absolute_log_error.toFixed(4)) && tiles[0]!.includes(`all ${v.loo.count} tokenized peers`));
+    assert.ok(tiles[1]!.includes(`×${v.loo.strict.error_factor.toFixed(2)}`) && tiles[1]!.includes(v.loo.strict.median_absolute_log_error.toFixed(4)));
+    if (v.walkForward.median_absolute_log_error != null) assert.ok(tiles[2]!.includes(`×${v.walkForward.error_factor.toFixed(2)}`) && tiles[2]!.includes(`split at ${v.walkForward.split_date}`) && tiles[2]!.includes(`earlier ${v.walkForward.train_count}`) && tiles[2]!.includes(`later ${v.walkForward.test_count}`));
+    else assert.ok(tiles[2]!.startsWith('—'));
+    for (const band of v.coverage.bands) assert.ok(tiles[3]!.includes(`${(100 * band.held_out.coverage).toFixed(1)}% (${band.held_out.covered}/${band.held_out.count})`));
+    assert.equal(JSON.stringify(cells(bands)), JSON.stringify(radar.launchContext.bands.map((b: Record<string, any>) => [b.band, String(b.n), String(b.with_token_record), `${(100 * b.share_with_token_record).toFixed(1)}%`])));
+    assert.ok(text.includes('not a launch probability; not used in the value or the rank'));
+    assert.ok(text.includes('Computed at build time from the sealed snapshot, for the exact model the board ships.'));
+    return text;
+  };
+  const fixture = dashboardFixtureRadar();
+  check(fixture);
+  // The figures are read, not written: a changed data object changes the rendered text.
+  const edited = structuredClone(fixture) as Record<string, any>;
+  edited.validation.loo.error_factor = 7.77;
+  edited.validation.ablation.rows[3].label = 'Renamed variant';
+  edited.validation.ablation.rows[3].beats_full = true;
+  edited.validation.ablation.rows[3].delta_vs_full = -0.5;
+  const text = check(edited);
+  assert.ok(text.includes('×7.77') && text.includes('Renamed variant beats the full model by 0.5000.'));
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed validation not checked');
+  check(sealed);
+});
+
+test('audit strip, row age-band tooltip and farm economics render from data; no pro-rata break-even is shown', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar);
+    const a = radar.audit;
+    const audit = all(UI.header(radar), hasClass('audit'))[0]!.textContent;
+    assert.ok(audit.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token · ${a.ranked_rows} ranked · ${a.excluded_pre_token} excluded (`), audit);
+    for (const reason of a.excluded_pre_token_by_reason) assert.ok(audit.includes(`${reason.count} ${reason.reason}`), audit);
+    assert.ok(audit.endsWith(`watchlist ${a.watchlist.present}/${a.watchlist.required}`), audit);
+    const v = State.compute();
+    const board = UI.board(v);
+    // No board column was added, and each row's tooltip ends with its own age band.
+    assert.equal(all(board, n => n.tagName === 'th').length, 7);
+    const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
+    assert.equal(rows.length, radar.rows.length);
+    rows.forEach((tr, i) => {
+      const r = v.rows[i]!, c = radar.launchContext.rows[r.slug];
+      assert.equal(tr.children.length, 7);
+      const tips = all(tr, hasClass('info-tip'));
+      assert.equal(tips.length, 1);
+      assert.ok(tips[0]!.dataset.tip!.endsWith(`\nAge band ${c.band}: ${(100 * c.share_with_token_record).toFixed(1)}% (n=${c.n}), share of protocols this age that record a token (cross-sectional share, not a launch probability; not used in the value or the rank).`), tips[0]!.dataset.tip);
+    });
+    const fa = radar.farm_assumptions;
+    for (const r of radar.rows as DashRow[]) {
+      const detail = UI.detail(radar, r.slug), fe = r.farm_economics;
+      const facts = all(all(detail, hasClass('what-takes'))[0]!, hasClass('facts'))[0]!.children.map(n => n.textContent);
+      const fact = (label: string) => facts[facts.indexOf(label) + 1];
+      assert.equal(fact('Step executions'), String(fe.step_executions));
+      assert.equal(fact('Hours'), String(fe.hours));
+      assert.equal(fact('Cost, gas + time'), `${UI.usd(fe.cost_usd_low)}–${UI.usd(fe.cost_usd_high)}`);
+      // Fix 24: one cost answer; the plan-fee midpoint and the cost share of implied value are no longer shown.
+      assert.ok(!facts.includes('Plan fees') && !facts.includes('Cost / implied value'), facts.join('|'));
+      const text = detail.textContent;
+      assert.ok(text.includes(`Cost assumes gas $${fa.gas_usd_per_step_low}-$${fa.gas_usd_per_step_high} per step, ${fa.minutes_per_step} minutes per step and time at $${fa.value_of_time_usd_per_hour}/hour. These are assumptions, not snapshot data.`));
+      assert.ok(!/break.even|pro rata/i.test(text));
+    }
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed rows not checked');
+  check(sealed);
+});
+
 test('snapshot parser rejects empty names, wrong-typed figures and duplicate watchlist slugs', () => {
   const raw = (protocols: unknown[], watchlist: unknown[] = []) => JSON.stringify({ as_of: '2025-01-01', source: 'fixture', floor_usd: 10, protocols, watchlist });
   const p = (overrides: Record<string, unknown> = {}) => ({ slug: 'alpha', name: 'Alpha', tvl_usd: 1, ...overrides });
@@ -1082,4 +1207,166 @@ test('runBacktest measures its contest arms under the build\'s factor decisions:
   assert.notDeepEqual(measurementReport(fixture).contest.W0, report.measurements.contest.W0);
   // The slopes do not depend on the factor settings.
   assert.equal(measurementReport(fixture).global_ratio_slope, report.measurements.global_ratio_slope);
+});
+
+// ---- radar-21: validation, launch context, farm economics, integrity audit ----
+
+test('walk-forward split: lower-median date, ties train, later rows test, undated rows in neither', () => {
+  const rows = [
+    { slug: 'e', listed_at: '2024-05-01' }, { slug: 'a', listed_at: '2021-01-01' }, { slug: 'u', listed_at: null },
+    { slug: 'c', listed_at: '2023-03-03' }, { slug: 'b', listed_at: '2022-02-02' }, { slug: 'd', listed_at: '2023-03-03' }, { slug: 'f', listed_at: '2025-06-01' }
+  ];
+  const split = walkForwardSplit(rows);
+  // Six dated rows: the lower median is the third date, shared by c and d, which both train.
+  assert.equal(split.split_date, '2023-03-03');
+  assert.deepEqual(split.train.map(row => row.slug), ['a', 'b', 'c', 'd']);
+  assert.deepEqual(split.test.map(row => row.slug), ['e', 'f']);
+  assert.deepEqual(split.undated.map(row => row.slug), ['u']);
+  assert.ok(split.train.every(row => row.listed_at! <= split.split_date!) && split.test.every(row => row.listed_at! > split.split_date!));
+  const odd = walkForwardSplit(rows.filter(row => row.slug !== 'f'));
+  assert.equal(odd.split_date, '2023-03-03');
+  assert.equal(odd.train.length + odd.test.length, 5);
+  assert.deepEqual(walkForwardSplit([{ slug: 'u', listed_at: null }]), { split_date: null, train: [], test: [], undated: [{ slug: 'u', listed_at: null }] });
+});
+
+const walkForwardFixture = (testScale = 1): Snapshot => {
+  const categories = ['DEX', 'Lending'];
+  const live = Array.from({ length: 16 }, (_, i) => protocol({
+    slug: `live-${String(i).padStart(2, '0')}`, name: `Live ${i}`, category: categories[i % 2]!, tvl_usd: 1e6 * (3 + ((i * 7) % 16)),
+    change_7d: ((i * 5) % 16) - 8, listed_at: `20${10 + i}-01-15`, mcap_usd: Math.round(1e6 * (3 + ((i * 7) % 16)) * (.4 + ((i * 3) % 5) * .2) * (i >= 8 ? testScale : 1))
+  }));
+  const undated = protocol({ slug: 'live-undated', name: 'Undated', category: 'DEX', tvl_usd: 9e6, mcap_usd: 9e9 });
+  const early = Array.from({ length: 6 }, (_, i) => protocol({ slug: `early-${i}`, name: `Early ${i}`, category: categories[i % 2]!, tvl_usd: 2e6 * (i + 1), change_7d: i - 3, listed_at: `2015-0${i + 1}-01` }));
+  return { ...snapshot([...live, undated, ...early]), as_of: '2026-06-01' };
+};
+
+test('walk-forward fits on the earlier half only: no later-half or undated market cap reaches the prediction', () => {
+  const base = walkForward(walkForwardFixture());
+  assert.equal(base.split_date, '2017-01-15');
+  assert.deepEqual([base.dated_peers, base.train_count, base.test_count, base.undated_peers_excluded], [16, 8, 8, 1]);
+  assert.ok(Number.isFinite(base.median_absolute_log_error) && base.median_absolute_log_error! >= 0);
+  assert.equal(base.error_factor, Math.round(Math.exp(base.median_absolute_log_error!) * 100) / 100);
+  // Tripling every later-half market cap must move each test error by exactly -ln 3: the fit never saw them.
+  const scaled = walkForward(walkForwardFixture(3));
+  assert.ok(Math.abs((scaled.median_log_error! - base.median_log_error!) + Math.log(3)) < 1e-6);
+  // The undated peer's extreme market cap is outside the fit too.
+  const fixture = walkForwardFixture();
+  fixture.protocols.find(p => p.slug === 'live-undated')!.mcap_usd = 1;
+  assert.equal(walkForward(fixture).median_log_error, base.median_log_error);
+});
+
+test('residual band coverage counts rows inside their basis group quantiles, in-sample and held out', () => {
+  // Residuals ln(realized / predicted) are -logError: category 0..4, global-anchored 10 and 20.
+  const rows = [0, 1, 2, 3, 4].map(r => ({ basis: 'category' as const, logError: -r })).concat([10, 20].map(r => ({ basis: 'global-anchored' as const, logError: -r })) as never);
+  // Category quartiles are 1 and 3 (3 of 5 inside); the pair's are 12.5 and 17.5 (0 of 2 inside).
+  assert.deepEqual(residualBandCoverage(rows, .25, .75), { count: 7, covered: 3, coverage: 3 / 7 });
+  assert.deepEqual(residualBandCoverage(rows, 0, 1), { count: 7, covered: 7, coverage: 1 });
+  // Held out, an extreme row cannot widen its own band: 0 and 4 fall outside the others' range, as do both pair rows.
+  assert.deepEqual(residualBandCoverage(rows, 0, 1, true), { count: 7, covered: 3, coverage: 3 / 7 });
+  assert.deepEqual(residualBandCoverage([], .25, .75), { count: 0, covered: 0, coverage: 0 });
+  assert.deepEqual(errorMetric([Math.log(2), Math.log(4), Math.log(8)]), { median_absolute_log_error: Math.log(4), error_factor: 4 });
+});
+
+test('ablation baselines: OLS recovers an exact power law and category medians an exact category ratio', () => {
+  const powerLaw = snapshot([1, 2, 3, 5, 8, 13].map((x, i) => protocol({ slug: `p${i}`, name: `P${i}`, category: i % 2 ? 'DEX' : 'Lending', tvl_usd: x * 1e6, mcap_usd: 7 * (x * 1e6) ** .5 })));
+  for (const error of olsLooErrors(powerLaw)) assert.ok(Math.abs(error) < 1e-9);
+  const ratios = snapshot([1, 2, 3, 4, 5, 6].map((x, i) => protocol({ slug: `c${i}`, name: `C${i}`, category: i % 2 ? 'DEX' : 'Lending', tvl_usd: x * 1e6, mcap_usd: x * 1e6 * (i % 2 ? 4 : .25) })));
+  for (const error of categoryMedianLooErrors(ratios)) assert.ok(Math.abs(error) < 1e-9);
+  // A category with no other tokenized peer falls back to the median ratio of all other peers.
+  const lone = snapshot([...ratios.protocols.filter(p => p.category === 'DEX'), protocol({ slug: 'solo', name: 'Solo', category: 'Yield', tvl_usd: 1e6, mcap_usd: 1e6 })]);
+  assert.ok(Math.abs(categoryMedianLooErrors(lone).at(-1)! - Math.log(4)) < 1e-9);
+});
+
+test('launch-context age bands have inclusive lower bounds and partition a fixture snapshot', () => {
+  assert.deepEqual([0, 364, 365, 729, 730, 1094, 1095, 1824, 1825, 9999, null].map(ageBand), ['<1y', '<1y', '1-2y', '1-2y', '2-3y', '2-3y', '3-5y', '3-5y', '5y+', '5y+', 'unknown']);
+  const day = (days: number) => new Date(Date.parse('2025-01-01T00:00:00Z') - days * 86400000).toISOString().slice(0, 10);
+  const fixture = snapshot([
+    protocol({ slug: 'a', listed_at: day(10) }), protocol({ slug: 'b', listed_at: day(100), symbol: 'B' }), protocol({ slug: 'c', listed_at: day(400), mcap_usd: 5 }),
+    protocol({ slug: 'd', listed_at: day(2000), gecko_id: 'd' }), protocol({ slug: 'e' }), protocol({ slug: 'f', mcap_usd: 0 })
+  ]);
+  const context = launchContext(fixture, [{ slug: 'a', age_days: 10 }, { slug: 'e', age_days: null }]);
+  assert.equal(context.bands.reduce((sum, band) => sum + band.n, 0), fixture.protocols.length);
+  const band = (label: string) => context.bands.find(row => row.band === label)!;
+  assert.deepEqual(band('<1y'), { band: '<1y', n: 2, with_token_record: 1, share_with_token_record: .5 });
+  assert.deepEqual(band('1-2y'), { band: '1-2y', n: 1, with_token_record: 1, share_with_token_record: 1 });
+  assert.deepEqual(band('2-3y'), { band: '2-3y', n: 0, with_token_record: 0, share_with_token_record: null });
+  assert.deepEqual(band('unknown'), { band: 'unknown', n: 2, with_token_record: 1, share_with_token_record: .5 });
+  assert.deepEqual(context.rows, { a: { band: '<1y', n: 2, share_with_token_record: .5 }, e: { band: 'unknown', n: 2, share_with_token_record: .5 } });
+});
+
+test('farm economics is the stated arithmetic on its assumptions, and leaves the plan totals alone', () => {
+  const assumptions = { gas_usd_per_step_low: 2, gas_usd_per_step_high: 5, minutes_per_step: 30, value_of_time_usd_per_hour: 20, airdrop_share_of_launch_value: .1 };
+  const p = protocol({ tvl_usd: 1e6 });
+  // Older than a year: 4 weeks. Five one-off steps plus one weekly step done 4 times = 9 executions, 4.5 hours, $90 of time.
+  const old = farmEconomics(p, 500, 2e6, assumptions);
+  assert.deepEqual(old, {
+    step_executions: 9, hours: 4.5, gas_usd_low: 18, gas_usd_high: 45, time_cost_usd: 90, cost_usd_low: 108, cost_usd_high: 135,
+    // Capital $50 of $1M TVL at a 10% airdrop is a 0.000005 share of launch value.
+    break_even_implied_value_usd_low: 108 / (50 / 1e6 * .1), break_even_implied_value_usd_high: 135 / (50 / 1e6 * .1),
+    break_even_share_of_implied_value_low: 108 / 2e6, break_even_share_of_implied_value_high: 135 / 2e6
+  });
+  const young = farmEconomics(p, 20, null, assumptions);
+  assert.equal(young.step_executions, 5 + 8);
+  assert.equal(young.cost_usd_high - young.cost_usd_low, 13 * (5 - 2));
+  assert.equal(young.break_even_share_of_implied_value_low, null);
+  // Executions are read from the steps' own weekly flags, not from a fixed position.
+  for (const age of [20, 500]) assert.equal(farmEconomics(p, age).step_executions, stepExecutions(farmSteps(p, age), farmTotals(p, age).weeks));
+  assert.equal(stepExecutions([{ text: 'a', cost: 'b', time: 'c' }, { text: 'a', cost: 'b', time: 'c', weekly: true }, { text: 'a', cost: 'b', time: 'c', weekly: true }], 8), 17);
+  assert.equal(farmEconomics(p, 500).hours, 9 * FARM_ASSUMPTIONS.minutes_per_step / 60);
+  assert.ok(FARM_ASSUMPTIONS.gas_usd_per_step_low < FARM_ASSUMPTIONS.gas_usd_per_step_high && /assumption/.test(FARM_ASSUMPTIONS.label));
+  assert.deepEqual(farmTotals(p, 500), { capital: 50, fees: 9 * 4.5, weeks: 4 });
+});
+
+test('integrity audit: tokenized + pre-token = total, ranked + excluded-by-reason = pre-token, watchlist computed', () => {
+  const fixture: Snapshot = { ...snapshot([
+    protocol({ slug: 'ranked-1', name: 'Ranked One' }), protocol({ slug: 'ranked-2', name: 'Ranked Two' }), protocol({ slug: 'cut', name: 'Cut Off' }),
+    protocol({ slug: 'bridge', name: 'Some Bridge', category: 'Bridge' }), protocol({ slug: 'v2', name: 'Thing V2' }), protocol({ slug: 'wrapped', name: 'Wrapped Thing' }),
+    protocol({ slug: 'cex', name: 'Binance Earn' }), protocol({ slug: 'zero', name: 'Zero', tvl_usd: 0 }),
+    protocol({ slug: 'live', name: 'Live', mcap_usd: 5 }), protocol({ slug: 'symbol', name: 'Symbol', symbol: 'S' }), protocol({ slug: 'dead', name: 'Dead', mcap_usd: 0 })
+  ]), watchlist: ['ranked-1', 'cut'] };
+  const audit = integrityAudit(fixture, [{ slug: 'ranked-1' }, { slug: 'ranked-2' }]);
+  assert.deepEqual([audit.total, audit.tokenized, audit.tokenized_calibration_peers, audit.tokenized_without_usable_market_cap, audit.pre_token, audit.ranked_rows, audit.excluded_pre_token], [11, 3, 1, 2, 8, 2, 6]);
+  assert.equal(audit.tokenized + audit.pre_token, audit.total);
+  assert.equal(audit.ranked_pre_token + audit.excluded_pre_token_by_reason.reduce((sum, row) => sum + row.count, 0), audit.pre_token);
+  assert.deepEqual(Object.fromEntries(audit.excluded_pre_token_by_reason.map(row => [row.reason, row.count])), {
+    'zero TVL': 1, 'derivative or exchange category': 1, 'versioned duplicate name': 1, 'wrapped or staked product name': 1, 'exchange-prefixed name': 1, [BEYOND_ROW_LIMIT]: 1
+  });
+  assert.deepEqual(audit.watchlist, { required: 2, present: 1, missing: ['cut'] });
+  assert.deepEqual(audit.sums, { tokenized_plus_pre_token_equals_total: true, ranked_plus_excluded_equals_pre_token: true, every_ranked_row_is_pre_token: true });
+  // The audit's reasons are the rule isRankable applies.
+  for (const p of fixture.protocols) assert.equal(isRankable(p), isPreToken(p) && exclusionReason(p) === null);
+});
+
+test('sealed snapshot: validation, launch context and audit are computed for the shipped model and account for every protocol', t => {
+  const sealed = sealedSnapshot();
+  if (!sealed) return t.skip('sealed snapshot not found (set TOKEN_RADAR_SNAPSHOT or mount /input/snapshot.json)');
+  const { radar, board } = buildRadar(sealed);
+  const { validation, launchContext: context, audit } = radar;
+  // The published LOO figure is the build's own calibration backtest, not a separate predictor's.
+  assert.equal(validation.loo.median_absolute_log_error, radar.calibration_backtest.median_absolute_log_error);
+  assert.equal(validation.loo.count, sealed.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0).length);
+  assert.equal(validation.ablation.rows[0]!.median_absolute_log_error, validation.loo.median_absolute_log_error);
+  assert.deepEqual(validation.ablation.rows.map(row => row.key), ['full', 'ols', 'no_growth', 'no_maturity', 'no_size', 'category_medians']);
+  for (const row of validation.ablation.rows) {
+    assert.equal(row.count, validation.loo.count);
+    assert.equal(row.error_factor, Math.round(Math.exp(row.median_absolute_log_error) * 100) / 100);
+    assert.equal(row.beats_full, row.median_absolute_log_error < validation.loo.median_absolute_log_error);
+  }
+  const walk = validation.walkForward;
+  assert.equal(walk.train_count + walk.test_count, walk.dated_peers);
+  assert.equal(walk.dated_peers + walk.undated_peers_excluded, validation.loo.count);
+  assert.ok(Math.abs(walk.train_count - walk.test_count) <= 1);
+  const shippedBand = validation.coverage.bands[0]!;
+  assert.equal(shippedBand.coverage, radar.calibration_backtest.band_coverage);
+  assert.equal(shippedBand.covered / shippedBand.count, shippedBand.coverage);
+  assert.equal(context.bands.reduce((sum, band) => sum + band.n, 0), sealed.protocols.length);
+  assert.equal(context.bands.reduce((sum, band) => sum + band.with_token_record, 0), audit.tokenized);
+  assert.deepEqual(Object.keys(context.rows).sort(), board.map(row => row.slug).sort());
+  assert.equal(audit.total, sealed.protocols.length);
+  assert.equal(audit.tokenized + audit.pre_token, audit.total);
+  assert.equal(audit.ranked_pre_token + audit.excluded_pre_token, audit.pre_token);
+  assert.equal(audit.ranked_rows, board.length);
+  assert.equal(audit.watchlist.required, sealed.watchlist.length);
+  assert.equal(audit.watchlist.present, audit.watchlist.required);
+  for (const row of radar.rows) assert.ok(row.farm_economics.cost_usd_low < row.farm_economics.cost_usd_high && row.farm_economics.hours > 0);
 });

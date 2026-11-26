@@ -212,7 +212,7 @@ function adjustmentParameters(protocol: SnapshotProtocol, rows: SnapshotProtocol
   return { slope: adjustment.slope, quad: adjustment.quad, center: adjustmentCenter(eligible) };
 }
 
-export function backtest(snapshot: Snapshot, options: {
+export type BacktestOptions = {
   biasFactor?: number;
   bandMultipliers?: BandMultipliers;
   bandMultiplier?: number;
@@ -228,81 +228,88 @@ export function backtest(snapshot: Snapshot, options: {
   fitAmplitudes?: boolean;
   derivedUnknownAge?: boolean;
   calibrationOptions?: CalibrationOptions;
-} = {}): BacktestObservation[] {
+  /** Refit the size-adjustment slope on each fold's training rows instead of taking the caller's slope (validation only; production passes its full-sample slope). */
+  refitSlope?: boolean;
+};
+
+/**
+ * One held-out prediction: the model is calibrated on `reduced` (which must not contain `peer`) and predicts `peer`'s
+ * market cap. Shared by every leave-one-out fold in `backtest` and by the walk-forward test, so both score the same
+ * procedure. `percentiles` are the 7d-change percentiles of the full snapshot (no market-cap information).
+ */
+export function observePeer(peer: SnapshotProtocol, reduced: Snapshot, percentiles: Map<string, number>, options: BacktestOptions = {}): BacktestObservation {
   const shapes = options.factorShapes ?? BASELINE_SHAPES;
   const model = options.model ?? MODEL;
-  const percentiles = changePercentiles(snapshot.protocols);
-  const observations: BacktestObservation[] = [];
-
-  for (const peer of snapshot.protocols.filter(isLive)) {
-    const reducedOriginal = { ...snapshot, protocols: snapshot.protocols.filter(p => p.slug !== peer.slug) };
-    const reduced = reducedOriginal;
-    const amplitudes = evaluatedAmplitudes(reduced, options.sizeAdjustment, options);
-    const unknownAge = amplitudes.unknownAge;
-    const params = adjustmentParameters(peer, reduced.protocols, options.sizeAdjustment);
-    const calibration = calibrate(reduced, params, options.centreEstimator, options.calibrationOptions);
-    const categorySet = peer.category ? calibration.categories.get(peer.category) : undefined;
-    let selected: CalibrationSet = categorySet ?? { count: 0, q25: 0, median: 0, q75: 0 };
-    if (options.peerWeighting === 'kernel' && peer.category && categorySet) {
-      const peers = reduced.protocols.filter(p => isLive(p) && p.category === peer.category);
-      const globalPeers = reduced.protocols.filter(p => isLive(p) && !DERIVATIVE.has(p.category ?? ''));
-      const iqr = (values: number[]) => quantile(values, .75) - quantile(values, .25);
-      const scale = (values: number[], fallback: number[]) => iqr(values) || iqr(fallback) || 1;
-      const hT = scale(peers.map(p => Math.log(p.tvl_usd)), globalPeers.map(p => Math.log(p.tvl_usd)));
-      const ageYears = (p: SnapshotProtocol) => (ageDays(snapshot.as_of, p.listed_at) ?? 365) / 365;
-      const hA = scale(peers.map(ageYears), globalPeers.map(ageYears));
-      const globalSamples = calibration.samples.get('global') ?? [];
-      const lower = quantile(globalSamples, .01);
-      const upper = quantile(globalSamples, .99);
-      const weighted = peers.map(p => {
-        const raw = Math.log(p.mcap_usd! / p.tvl_usd) + (params ? -params.slope * (Math.log(p.tvl_usd) - params.center) : 0);
-        const x = Math.max(lower, Math.min(upper, raw));
-        const dt = Math.log(p.tvl_usd) - Math.log(peer.tvl_usd);
-        const da = ageYears(p) - ageYears(peer);
-        return { value: x, weight: Math.exp(-(dt * dt) / (2 * hT * hT)) * Math.exp(-(da * da) / (2 * hA * hA)) };
-      }).sort((a, b) => a.value - b.value);
-      const wq = (level: number) => {
-        const total = weighted.reduce((sum, row) => sum + row.weight, 0);
-        let cumulative = 0;
-        for (const row of weighted) {
-          cumulative += row.weight / total;
-          if (cumulative >= level) return row.value;
-        }
-        return weighted.at(-1)?.value ?? 0;
-      };
-      selected = { count: categorySet.count, q25: wq(.25), median: wq(.5), q75: wq(.75) };
-    }
-    const prediction = estimate(peer, snapshot.as_of, selected, calibration.global, model, calibration.medianChange, {
-      factorShapes: shapes,
-      changePercentile: percentiles.get(peer.slug) ?? .5,
-      categorySamples: options.dispersionShrinkage === false ? undefined : (peer.category ? calibration.samples.get(peer.category) : undefined),
-      globalSamples: options.dispersionShrinkage === false ? undefined : calibration.samples.get('global'),
-      biasFactor: options.biasFactor,
-      sizeAdjustment: params,
-      singlePeerBlend: options.singlePeerBlend
-      , centreEstimator: options.centreEstimator,
-      shrinkage: options.shrinkage
-      , amplitudes, unknownAge
-    });
-    const factors = factorNormalizers(reduced, shapes, model, calibration.medianChange, unknownAge, amplitudes);
-    // Production divides the scored rows' factor medians out of every row: the unweighted normalization term.
-    // factorWeight (research arms only) then scales the row's own factor log-deviations from those medians, so the
-    // weighted log value carries w*(ln g - ln gMedian) + w*(ln m - ln mMedian) in place of the unweighted deviations.
-    // The correction varies by row, so a median bias correction cannot cancel it; at the default weight 1 nothing is
-    // added and the observations are bit-identical.
-    const factorWeight = options.factorWeight ?? 1;
-    const factorDeviation = (Math.log(prediction.growthMult) - Math.log(factors.growth)) + (Math.log(prediction.maturityMult) - Math.log(factors.maturity));
-    const unweighted = -Math.log(factors.growth) - Math.log(factors.maturity);
-    const normalization = factorWeight === 1 ? unweighted : unweighted + (factorWeight - 1) * factorDeviation;
-    const logError = Math.log(prediction.implied / peer.mcap_usd!) + normalization;
-    const width = options.bandMultipliers?.[prediction.basis === 'category' ? 'category' : 'global_anchored'] ?? options.bandMultiplier ?? 1;
-    const lowLogDistance = prediction.centre - prediction.q25;
-    const highLogDistance = prediction.q75 - prediction.centre;
-    const covered = withinBand(logError, lowLogDistance, highLogDistance, width);
-    const bandRatio = prediction.high / Math.max(1, prediction.low);
-    observations.push({ slug: peer.slug, basis: prediction.basis, covered, logError, lowLogDistance, highLogDistance, bandRatio, peerCount: prediction.ratioCount, blendWeight: prediction.blendWeight, predictedValue: prediction.implied * Math.exp(normalization), realizedValue: peer.mcap_usd! });
+  const sizeAdjustment = options.refitSlope && options.sizeAdjustment ? { ...options.sizeAdjustment, slope: globalSizeAdjustment(reduced).slope } : options.sizeAdjustment;
+  const amplitudes = evaluatedAmplitudes(reduced, sizeAdjustment, options);
+  const unknownAge = amplitudes.unknownAge;
+  const params = adjustmentParameters(peer, reduced.protocols, sizeAdjustment);
+  const calibration = calibrate(reduced, params, options.centreEstimator, options.calibrationOptions);
+  const categorySet = peer.category ? calibration.categories.get(peer.category) : undefined;
+  let selected: CalibrationSet = categorySet ?? { count: 0, q25: 0, median: 0, q75: 0 };
+  if (options.peerWeighting === 'kernel' && peer.category && categorySet) {
+    const peers = reduced.protocols.filter(p => isLive(p) && p.category === peer.category);
+    const globalPeers = reduced.protocols.filter(p => isLive(p) && !DERIVATIVE.has(p.category ?? ''));
+    const iqr = (values: number[]) => quantile(values, .75) - quantile(values, .25);
+    const scale = (values: number[], fallback: number[]) => iqr(values) || iqr(fallback) || 1;
+    const hT = scale(peers.map(p => Math.log(p.tvl_usd)), globalPeers.map(p => Math.log(p.tvl_usd)));
+    const ageYears = (p: SnapshotProtocol) => (ageDays(reduced.as_of, p.listed_at) ?? 365) / 365;
+    const hA = scale(peers.map(ageYears), globalPeers.map(ageYears));
+    const globalSamples = calibration.samples.get('global') ?? [];
+    const lower = quantile(globalSamples, .01);
+    const upper = quantile(globalSamples, .99);
+    const weighted = peers.map(p => {
+      const raw = Math.log(p.mcap_usd! / p.tvl_usd) + (params ? -params.slope * (Math.log(p.tvl_usd) - params.center) : 0);
+      const x = Math.max(lower, Math.min(upper, raw));
+      const dt = Math.log(p.tvl_usd) - Math.log(peer.tvl_usd);
+      const da = ageYears(p) - ageYears(peer);
+      return { value: x, weight: Math.exp(-(dt * dt) / (2 * hT * hT)) * Math.exp(-(da * da) / (2 * hA * hA)) };
+    }).sort((a, b) => a.value - b.value);
+    const wq = (level: number) => {
+      const total = weighted.reduce((sum, row) => sum + row.weight, 0);
+      let cumulative = 0;
+      for (const row of weighted) {
+        cumulative += row.weight / total;
+        if (cumulative >= level) return row.value;
+      }
+      return weighted.at(-1)?.value ?? 0;
+    };
+    selected = { count: categorySet.count, q25: wq(.25), median: wq(.5), q75: wq(.75) };
   }
-  return observations;
+  const prediction = estimate(peer, reduced.as_of, selected, calibration.global, model, calibration.medianChange, {
+    factorShapes: shapes,
+    changePercentile: percentiles.get(peer.slug) ?? .5,
+    categorySamples: options.dispersionShrinkage === false ? undefined : (peer.category ? calibration.samples.get(peer.category) : undefined),
+    globalSamples: options.dispersionShrinkage === false ? undefined : calibration.samples.get('global'),
+    biasFactor: options.biasFactor,
+    sizeAdjustment: params,
+    singlePeerBlend: options.singlePeerBlend
+    , centreEstimator: options.centreEstimator,
+    shrinkage: options.shrinkage
+    , amplitudes, unknownAge
+  });
+  const factors = factorNormalizers(reduced, shapes, model, calibration.medianChange, unknownAge, amplitudes);
+  // Production divides the scored rows' factor medians out of every row: the unweighted normalization term.
+  // factorWeight (research arms only) then scales the row's own factor log-deviations from those medians, so the
+  // weighted log value carries w*(ln g - ln gMedian) + w*(ln m - ln mMedian) in place of the unweighted deviations.
+  // The correction varies by row, so a median bias correction cannot cancel it; at the default weight 1 nothing is
+  // added and the observations are bit-identical.
+  const factorWeight = options.factorWeight ?? 1;
+  const factorDeviation = (Math.log(prediction.growthMult) - Math.log(factors.growth)) + (Math.log(prediction.maturityMult) - Math.log(factors.maturity));
+  const unweighted = -Math.log(factors.growth) - Math.log(factors.maturity);
+  const normalization = factorWeight === 1 ? unweighted : unweighted + (factorWeight - 1) * factorDeviation;
+  const logError = Math.log(prediction.implied / peer.mcap_usd!) + normalization;
+  const width = options.bandMultipliers?.[prediction.basis === 'category' ? 'category' : 'global_anchored'] ?? options.bandMultiplier ?? 1;
+  const lowLogDistance = prediction.centre - prediction.q25;
+  const highLogDistance = prediction.q75 - prediction.centre;
+  const covered = withinBand(logError, lowLogDistance, highLogDistance, width);
+  const bandRatio = prediction.high / Math.max(1, prediction.low);
+  return { slug: peer.slug, basis: prediction.basis, covered, logError, lowLogDistance, highLogDistance, bandRatio, peerCount: prediction.ratioCount, blendWeight: prediction.blendWeight, predictedValue: prediction.implied * Math.exp(normalization), realizedValue: peer.mcap_usd! };
+}
+
+export function backtest(snapshot: Snapshot, options: BacktestOptions = {}): BacktestObservation[] {
+  const percentiles = changePercentiles(snapshot.protocols);
+  return snapshot.protocols.filter(isLive).map(peer => observePeer(peer, { ...snapshot, protocols: snapshot.protocols.filter(p => p.slug !== peer.slug) }, percentiles, options));
 }
 
 
@@ -362,13 +369,16 @@ export function selectionDiagnostics(rows: BacktestObservation[]) {
   };
 }
 
+/** The coverage the shipped band's width multiplier is tuned to: the nominal level of the low-high band. */
+export const BAND_TARGET_COVERAGE = .5;
+
 export function bestBandMultiplier(rows: BacktestObservation[]): number {
   let best = .5;
   let closest = Infinity;
   for (let step = 50; step <= 300; step++) {
     const candidate = step / 100;
     const coverage = rows.length ? rows.filter(row => withinBand(row.logError, row.lowLogDistance, row.highLogDistance, candidate)).length / rows.length : 0;
-    const distance = Math.abs(coverage - .5);
+    const distance = Math.abs(coverage - BAND_TARGET_COVERAGE);
     if (distance < closest) {
       closest = distance;
       best = candidate;
@@ -448,8 +458,15 @@ export function summarizeGradeBands(rows: BacktestObservation[]) {
   });
 }
 
+/**
+ * The grade thresholds, defined once: a grade needs at least `min_peers` calibration peers and a band ratio of at most
+ * `max_band_ratio`; a row meeting neither A nor B is C. Emitted as `grade_rules`, which the dashboard builds its rule text from.
+ */
+export const GRADE_RULES = { A: { min_peers: 10, max_band_ratio: 10 }, B: { min_peers: 5, max_band_ratio: 30 } } as const;
+
 export function gradeForBandRatio(bandRatio: number, peerCount: number): 'A' | 'B' | 'C' {
-  return peerCount >= 10 && bandRatio <= 10 ? 'A' : peerCount >= 5 && bandRatio <= 30 ? 'B' : 'C';
+  const meets = (rule: { min_peers: number; max_band_ratio: number }) => peerCount >= rule.min_peers && bandRatio <= rule.max_band_ratio;
+  return meets(GRADE_RULES.A) ? 'A' : meets(GRADE_RULES.B) ? 'B' : 'C';
 }
 
 function leastSquaresSlope(rows: SnapshotProtocol[]): number {
@@ -522,6 +539,160 @@ export function measurementReport(snapshot: Snapshot, variants: { fitAmplitudes?
       P0: baseline.summary,
       P1: blended.summary,
       P1_proxy: { P0: summarizeBacktest(p0Rows).all, P1: summarizeBacktest(p1Rows).all }
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Validation of the shipped model (radar-21). Every figure below is computed from the snapshot at build time.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The quantile levels of the wider, not shipped, residual band reported beside the shipped one. */
+export const WIDE_BAND_QUANTILES = { low: .1, high: .9 } as const;
+const SHIPPED_BAND_QUANTILES = { low: .25, high: .75 } as const;
+
+const round2 = (value: number) => Math.round(value * 100) / 100;
+/** A median absolute log error with the multiplicative error factor e^value it stands for, to 2 decimals. */
+export function errorMetric(absoluteLogErrors: number[]) {
+  const value = median(absoluteLogErrors);
+  return { median_absolute_log_error: value, error_factor: round2(Math.exp(value)) };
+}
+
+/**
+ * Splits dated rows at their median listing date. The split date is the lower median of the sorted dates; rows listed
+ * on or before it train, rows listed after it test, so rows sharing the split date all train. Undated rows are in neither.
+ */
+export function walkForwardSplit<T extends { slug: string; listed_at: string | null }>(rows: T[]): { split_date: string | null; train: T[]; test: T[]; undated: T[] } {
+  const dated = rows.filter(row => row.listed_at !== null).sort((a, b) => a.listed_at! < b.listed_at! ? -1 : a.listed_at! > b.listed_at! ? 1 : a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
+  const undated = rows.filter(row => row.listed_at === null);
+  if (!dated.length) return { split_date: null, train: [], test: [], undated };
+  const splitDate = dated[Math.floor((dated.length - 1) / 2)]!.listed_at!;
+  return { split_date: splitDate, train: dated.filter(row => row.listed_at! <= splitDate), test: dated.filter(row => row.listed_at! > splitDate), undated };
+}
+
+type FactorVariants = { fitAmplitudes?: boolean; derivedUnknownAge?: boolean };
+
+/**
+ * Walk-forward test of the shipped procedure. The training snapshot keeps every protocol except the tokenized peers
+ * outside the earlier half (the later half and the undated peers), so no test market cap reaches the size slope, the
+ * category and global calibration, the bias correction, the residual quantiles or the band multipliers: all are
+ * refit on the earlier half alone. Each later-half peer is then predicted once and scored against that band.
+ */
+export function walkForward(snapshot: Snapshot, variants: FactorVariants = {}) {
+  const split = walkForwardSplit(snapshot.protocols.filter(isLive));
+  const trainSlugs = new Set(split.train.map(p => p.slug));
+  const train: Snapshot = { ...snapshot, protocols: snapshot.protocols.filter(p => !isLive(p) || trainSlugs.has(p.slug)) };
+  const base = { split_date: split.split_date, dated_peers: split.train.length + split.test.length, undated_peers_excluded: split.undated.length, train_count: split.train.length, test_count: split.test.length };
+  if (!split.train.length || !split.test.length) return { ...base, median_absolute_log_error: null, error_factor: null, median_log_error: null, band_coverage: null, band_nominal_coverage: BAND_TARGET_COVERAGE };
+  const sizeAdjustment: SizeAdjustment = { mode: 'global', slope: globalSizeAdjustment(train).slope };
+  const fitted = calibrateBacktest(train, BASELINE_SHAPES, sizeAdjustment, variants);
+  const percentiles = changePercentiles(snapshot.protocols);
+  const observations = split.test.map(peer => observePeer(peer, train, percentiles, { sizeAdjustment, ...variants, biasFactor: fitted.correctionFactor }));
+  const covered = observations.filter(row => {
+    const key = row.basis === 'category' ? 'category' : 'global_anchored';
+    return withinBand(row.logError, -fitted.residualQuantiles[key].r25, fitted.residualQuantiles[key].r75, fitted.widthMultipliers[key]);
+  }).length;
+  return { ...base, ...errorMetric(observations.map(row => Math.abs(row.logError))), median_log_error: median(observations.map(row => row.logError)), band_coverage: covered / observations.length, band_nominal_coverage: BAND_TARGET_COVERAGE };
+}
+
+/**
+ * Share of rows whose realized value lies between the `lowLevel` and `highLevel` quantiles of the residuals
+ * ln(realized / predicted) of their own basis group. With `jackknife` each row is scored against the quantiles of the
+ * other rows in its group, so a row cannot widen the band that is then said to contain it.
+ */
+export function residualBandCoverage(rows: Array<Pick<BacktestObservation, 'basis' | 'logError'>>, lowLevel: number, highLevel: number, jackknife = false) {
+  const group = (row: Pick<BacktestObservation, 'basis'>) => row.basis === 'category';
+  let covered = 0;
+  rows.forEach((row, index) => {
+    const residuals = rows.filter((other, otherIndex) => group(other) === group(row) && !(jackknife && otherIndex === index)).map(other => -other.logError);
+    if (!residuals.length) return;
+    const residual = -row.logError;
+    if (residual >= quantile(residuals, lowLevel) && residual <= quantile(residuals, highLevel)) covered++;
+  });
+  return { count: rows.length, covered, coverage: rows.length ? covered / rows.length : 0 };
+}
+
+/** Leave-one-out log errors ln(predicted / realized) of a plain least-squares line ln(mcap) = a + b ln(TVL) over all tokenized peers. */
+export function olsLooErrors(snapshot: Snapshot): number[] {
+  const live = snapshot.protocols.filter(isLive);
+  return live.map(peer => {
+    const rest = live.filter(p => p.slug !== peer.slug);
+    if (!rest.length) return 0;
+    const slope = leastSquaresSlope(rest);
+    const meanX = rest.reduce((sum, p) => sum + Math.log(p.tvl_usd), 0) / rest.length;
+    const meanY = rest.reduce((sum, p) => sum + Math.log(p.mcap_usd!), 0) / rest.length;
+    return meanY + slope * (Math.log(peer.tvl_usd) - meanX) - Math.log(peer.mcap_usd!);
+  });
+}
+
+/**
+ * Leave-one-out log errors of "category medians only": TVL times the median market-cap/TVL ratio of the other tokenized
+ * peers in the same category, or of all other tokenized peers when the category has no other. No shrinkage, size
+ * adjustment, factors, winsorizing or bias correction.
+ */
+export function categoryMedianLooErrors(snapshot: Snapshot): number[] {
+  const live = snapshot.protocols.filter(isLive);
+  const logRatio = (p: SnapshotProtocol) => Math.log(p.mcap_usd! / p.tvl_usd);
+  return live.map(peer => {
+    const rest = live.filter(p => p.slug !== peer.slug);
+    const same = rest.filter(p => p.category !== null && p.category === peer.category);
+    return median((same.length ? same : rest).map(logRatio)) - logRatio(peer);
+  });
+}
+
+/**
+ * The published validation of the shipped model. `shipped` is the build's own calibrated backtest (the observations the
+ * board's bias correction and bands come from) and `slope` the size slope the board uses.
+ */
+export function validationReport(snapshot: Snapshot, shipped: ReturnType<typeof calibrateBacktest>, slope: number, variants: FactorVariants = {}) {
+  const sizeAdjustment: SizeAdjustment = { mode: 'global', slope };
+  const absolute = (rows: Array<{ logError: number }>) => rows.map(row => Math.abs(row.logError));
+  const full = errorMetric(absolute(shipped.observations));
+  // Strict variant: the size slope is refit inside every fold and each peer's bias correction is the median error of
+  // the other peers, so neither constant has seen the held-out market cap.
+  const strictRaw = backtest(snapshot, { sizeAdjustment, ...variants, refitSlope: true }).map(row => row.logError);
+  const strict = strictRaw.map((error, index) => error - median(strictRaw.filter((_, other) => other !== index)));
+  const arm = (shapes: FactorShapes, adjustment: SizeAdjustment | undefined) => absolute(calibrateBacktest(snapshot, shapes, adjustment, variants).observations);
+  const ablationRows: Array<[string, string, number[]]> = [
+    ['full', 'Full shipped model', absolute(shipped.observations)],
+    ['ols', 'Plain log-log OLS: ln(mcap) on ln(TVL)', olsLooErrors(snapshot).map(Math.abs)],
+    ['no_growth', 'Shipped model without the growth factor', arm({ ...BASELINE_SHAPES, growth: 'G3' }, sizeAdjustment)],
+    ['no_maturity', 'Shipped model without the maturity factor', arm({ ...BASELINE_SHAPES, maturity: 'M2' }, sizeAdjustment)],
+    ['no_size', 'Shipped model without the size adjustment', arm(BASELINE_SHAPES, undefined)],
+    ['category_medians', 'Category medians only', categoryMedianLooErrors(snapshot).map(Math.abs)]
+  ];
+  const shippedCovered = shipped.observations.filter(row => row.covered).length;
+  const wideNominal = WIDE_BAND_QUANTILES.high - WIDE_BAND_QUANTILES.low;
+  return {
+    model: 'the shipped model: the same calibration, factors, size adjustment and bias correction the board is built with',
+    metric: 'median over peers of |ln(predicted market cap / actual market cap)|; error_factor = e^metric; no clamping, no peer dropped',
+    peers: shipped.observations.length,
+    loo: {
+      definition: 'leave-one-out over every tokenized peer (market cap > 0 and TVL > 0): calibration sets and factor normalizers are refit without the held-out peer; the size slope and the median bias correction are the full-sample constants the board ships',
+      count: shipped.observations.length,
+      ...full,
+      strict: {
+        definition: 'as above, but the size slope is refit in every fold and each peer is bias-corrected with the median error of the other peers',
+        ...errorMetric(strict.map(Math.abs))
+      }
+    },
+    walkForward: {
+      definition: 'tokenized peers with a listing date, split at the median date (ties train); every fitted quantity comes from the earlier half only; the later half is predicted once',
+      ...walkForward(snapshot, variants)
+    },
+    coverage: {
+      definition: 'share of peers whose actual market cap lies inside the band around their leave-one-out prediction',
+      bands: [
+        { label: 'shipped low-high band', nominal_coverage: BAND_TARGET_COVERAGE, shipped: true, count: shipped.observations.length, covered: shippedCovered, coverage: shipped.observations.length ? shippedCovered / shipped.observations.length : 0, note: 'in-sample: the band quantiles and width multipliers are tuned on these same leave-one-out residuals to reach the nominal level', held_out: { definition: 'each peer scored against the residual quantiles of the other peers in its basis group', ...residualBandCoverage(shipped.observations, SHIPPED_BAND_QUANTILES.low, SHIPPED_BAND_QUANTILES.high, true) } },
+        { label: 'wide band from the same residuals (not shown on the board)', nominal_coverage: wideNominal, shipped: false, quantiles: WIDE_BAND_QUANTILES, ...residualBandCoverage(shipped.observations, WIDE_BAND_QUANTILES.low, WIDE_BAND_QUANTILES.high), note: 'in-sample', held_out: { definition: 'each peer scored against the residual quantiles of the other peers in its basis group', ...residualBandCoverage(shipped.observations, WIDE_BAND_QUANTILES.low, WIDE_BAND_QUANTILES.high, true) } }
+      ]
+    },
+    ablation: {
+      definition: 'the same leave-one-out metric over the same peers for each variant; each model variant is recalibrated on its own (own bias correction); the OLS and category-median rows have no bias correction',
+      rows: ablationRows.map(([key, label, errors]) => {
+        const metric = errorMetric(errors);
+        return { key, label, count: errors.length, ...metric, delta_vs_full: metric.median_absolute_log_error - full.median_absolute_log_error, beats_full: metric.median_absolute_log_error < full.median_absolute_log_error };
+      })
     }
   };
 }

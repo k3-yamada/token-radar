@@ -7,15 +7,11 @@
     return;
   }
 
-  var headerCountUpStarted = false;
-
   function countHeaderStats() {
-    if (headerCountUpStarted) return;
-    headerCountUpStarted = true;
-    if (!window.matchMedia || !window.matchMedia('(prefers-reduced-motion: no-preference)').matches) return;
-    Array.prototype.forEach.call(root.querySelectorAll('.metrics .metric b'), function (node) {
+    if (!window.matchMedia('(prefers-reduced-motion: no-preference)').matches) return;
+    root.querySelectorAll('.metrics .metric b').forEach(function (node) {
       var original = node.textContent, finalValue = /^\d+$/.test(original) ? Number(original) : null;
-      if (finalValue === null || !isFinite(finalValue)) return;
+      if (finalValue === null) return;
       var started = null;
       node.textContent = '0';
       function frame(now) {
@@ -35,6 +31,7 @@
 
   function mount() {
     var v = State.compute(), d = v.data;
+    document.title += ' · ' + d.model_version;
     page = document.createElement('div');
     // Entrance animations are scoped to .is-entering, which only the initial mount carries.
     page.className = 'page is-entering';
@@ -44,12 +41,17 @@
     boardRegion = UI.board(v);
     detailRegion = document.createElement('div');
     detailRegion.dataset.results = 'detail';
-    page.append(UI.header(d), shortlistRegion, UI.curve(v), boardRegion, detailRegion);
-    page.append(UI.chart(v), UI.method(d), UI.live(d));
+    // The picks beside the evidence (curve over validation tiles); one column when narrow.
+    var region = document.createElement('div');
+    region.className = 'first-region';
+    region.append(shortlistRegion, UI.curve(v));
+    page.append(UI.header(d), region, boardRegion, detailRegion);
+    page.append(UI.chart(v), UI.validation(d), UI.method(d), UI.live(d));
     var note = document.createElement('aside');
-    note.className = 'fixed-note';
+    note.className = 'est-note';
     note.textContent = 'Model estimates, not prices.';
-    page.appendChild(note);
+    // In the board's header row, so it never covers board data.
+    boardRegion.querySelector('.section-head').appendChild(note);
     root.replaceChildren(page);
     countHeaderStats();
   }
@@ -85,9 +87,13 @@
     State.update({ selected: null });
     renderDetail();
     // Back to the element that opened it. If the board was re-rendered meanwhile, the same protocol's row in the same
-    // region stands in; focusing it also scrolls it back into view.
-    var target = opener && opener.isConnected ? opener : openerRegion && openerRegion.isConnected ? openerRegion.querySelector('[data-slug="' + slug + '"]') : null;
-    if (target) target.focus();
+    // region stands in. Focus that stays put (Escape) does not scroll.
+    var target = opener && opener.isConnected ? opener : openerRegion && openerRegion.isConnected ? openerRegion.querySelector('[data-slug="' + slug + '"]') : null, b;
+    if (target) {
+      target.focus();
+      b = target.getBoundingClientRect();
+      if (b.bottom < 0 || b.top > innerHeight) target.scrollIntoView({ block: 'center' });
+    }
     opener = openerRegion = null;
   }
 
@@ -133,7 +139,7 @@
   // (app.css: right edge on the marker) and every place set here must stay inside the page, or the document widens.
   // Centred on the marker where that fits (.info-tip-right: ending at it), otherwise moved in by the shortfall.
   function placeTip(e) {
-    var t = e.target.closest && e.target.closest('.info-tip');
+    var t = e.target.closest('.info-tip');
     if (!t) return;
     var b = getComputedStyle(t, '::after'), p = getComputedStyle(page), box = page.getBoundingClientRect(), a = t.getBoundingClientRect();
     var w = ['width', 'paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce(function (sum, k) { return sum + parseFloat(b[k]); }, 0);
@@ -145,11 +151,11 @@
   root.addEventListener('focusin', placeTip);
   // A placement is only good for the width it was measured at.
   window.addEventListener('resize', function () {
-    Array.prototype.forEach.call(root.querySelectorAll('.info-tip[style]'), function (t) { t.style.removeProperty('--tip-x'); });
+    root.querySelectorAll('.info-tip[style]').forEach(function (t) { t.style.removeProperty('--tip-x'); });
   });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && State.getState().selected) closeDetail();
+    if (e.key === 'Escape') closeDetail();
   });
 
   mount();

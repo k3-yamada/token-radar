@@ -9,8 +9,22 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
+/** Why a pre-token protocol is not rankable, in the order the rule checks them; null when it is rankable. */
+export const EXCLUSION_REASONS = ['zero TVL', 'derivative or exchange category', 'versioned duplicate name', 'wrapped or staked product name', 'exchange-prefixed name'] as const;
+export type ExclusionReason = typeof EXCLUSION_REASONS[number];
+
+/** The first rankability rule a protocol fails (token status aside), or null. Single source for `isRankable` and the audit. */
+export function exclusionReason(p: SnapshotProtocol): ExclusionReason | null {
+  if (!(p.tvl_usd > 0)) return 'zero TVL';
+  if (EXCLUDED_CATEGORIES.has((p.category ?? '').toLowerCase())) return 'derivative or exchange category';
+  if (VERSIONED.test(p.name)) return 'versioned duplicate name';
+  if (EXCLUDED_NAME_WORDS.test(p.name)) return 'wrapped or staked product name';
+  if (EXCHANGE_PREFIX.test(p.name)) return 'exchange-prefixed name';
+  return null;
+}
+
 export function isRankable(p: SnapshotProtocol): boolean {
-  return p.tvl_usd > 0 && isPreToken(p) && !EXCLUDED_CATEGORIES.has((p.category ?? '').toLowerCase()) && !VERSIONED.test(p.name) && !EXCLUDED_NAME_WORDS.test(p.name) && !EXCHANGE_PREFIX.test(p.name);
+  return isPreToken(p) && exclusionReason(p) === null;
 }
 
 /**

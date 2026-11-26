@@ -58,19 +58,21 @@ export const MODEL: ModelConstants = {
   global_excluded_categories: ['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX'],
   peer_token_share: 'TVL with positive market cap / total category TVL; detail reports protocol counts',
   chain_factor: 'none (tested against the live set; no relation)',
-  farm_plan_totals: 'capital=initial prescribed principal; fees=exact sum of stated step cost-range midpoints (3, 7, 4.5, 4.5 per activity week, 1.5, 6, 6.5); weeks=4 or 8 activity span',
+  farm_plan_totals: 'capital=initial prescribed principal; fees=step executions (one-off steps once, weekly steps once per activity week) x the midpoint of the assumed per-step gas range; weeks=4 or 8 activity span',
   minimum_implied_value_usd: 1,
   board_max_rows: 200,
   early_rows: 160,
   live_rows: 24,
 };
 
-export const MODEL_VERSION = 'radar-20';
+export const MODEL_VERSION = 'radar-21';
 
 export interface FarmStep {
   text: string;
   cost: string;
   time: string;
+  /** Done once per activity week; every other step is done once. */
+  weekly?: boolean;
 }
 
 export interface CalibrationSet {
@@ -103,6 +105,8 @@ export interface Calibration {
   medianChange: number;
   peerCounts: Map<string, { tokenized: number; total: number }>;
   samples: Map<string, number[]>;
+  /** The winsor bounds this calibration was computed with, as fractions [low, high]. */
+  winsor: [number, number];
 }
 
 export interface BoardRow {
@@ -175,6 +179,7 @@ export interface RadarRow {
   plan_capital_usd: number;
   plan_fees_usd: number;
   plan_weeks: number;
+  farm_economics: ReturnType<typeof import('./farmplan.ts').farmEconomics>;
 }
 
 export interface LiveRow {
@@ -193,6 +198,12 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  /** GRADE_RULES (backtest.ts): the thresholds gradeForBandRatio applies. Anything that is neither A nor B is C. */
+  grade_rules: Record<'A' | 'B', { min_peers: number; max_band_ratio: number }>;
+  /** RESAMPLE_COUNT (uncertainty.ts): calibration-set resamples behind each rank range. */
+  resample_count: number;
+  /** The winsor bounds the board's calibration used (calibration.ts), as percentiles, e.g. [1, 99]. */
+  winsor_percentiles: [number, number];
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -216,4 +227,8 @@ export interface RadarData {
   fitted_factor_amplitudes?: { growth: number; maturity: number };
   derived_unknown_listed_age_days: number;
   top20_jackknife_overlap: number;
+  validation: ReturnType<typeof import('./backtest.ts').validationReport>;
+  launchContext: ReturnType<typeof import('./launchContext.ts').launchContext>;
+  farm_assumptions: typeof import('./farmplan.ts').FARM_ASSUMPTIONS;
+  audit: ReturnType<typeof import('./audit.ts').integrityAudit>;
 }
