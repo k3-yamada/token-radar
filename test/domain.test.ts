@@ -12,8 +12,8 @@ import { BEYOND_ROW_LIMIT, integrityAudit } from '../lib/domain/audit.ts';
 import { calibrate } from '../lib/domain/calibration.ts';
 import { adjustLogRatio, ageDays, changePercentiles, estimate, growthFactor, maturityFactor, BASELINE_SHAPES } from '../lib/domain/estimate.ts';
 import { effectiveShrinkageK } from '../lib/domain/estimate.ts';
-import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest, categoryMedianLooErrors, errorMetric, olsLooErrors, residualBandCoverage, walkForward, walkForwardSplit } from '../lib/domain/backtest.ts';
-import { CHAIN_GAS, FARM_ASSUMPTIONS, GAS_OTHER, chainGas, chainKind, farmEconomics, farmGroup, farmSteps, farmTotals, stepExecutions, stepText } from '../lib/domain/farmplan.ts';
+import { adoptFittedAmplitudes, withinBand, type ContestMetrics, backtest, calibrateBacktest, derivedUnknownAge, evaluatedAmplitudes, factorChangeReport, factorNormalizers, fitFactorAmplitudes, globalSizeAdjustment, gradeForBandRatio, measurementReport, summarizeBacktest, categoryMedianLooErrors, errorMetric, olsLooErrors, plainCurveValidation, residualBandCoverage, walkForward, walkForwardSplit } from '../lib/domain/backtest.ts';
+import { CHAIN_GAS, FARM_ASSUMPTIONS, GAS_OTHER, chainGas, chainKind, farmEconomics, farmGroup, farmSteps, farmTotals, protocolFacts, stepExecutions, stepText, tvlBand } from '../lib/domain/farmplan.ts';
 import { boardIssue } from '../lib/domain/board.ts';
 import { buildBoard } from '../lib/domain/board.ts';
 import { rankRanges } from '../lib/domain/uncertainty.ts';
@@ -290,10 +290,11 @@ test('farm plans keep the board contract in every category branch: 3-12 steps of
           const weeks = age !== null && age < 365 ? 8 : 4;
           assert.ok(steps[3]!.startsWith(`Once a week for ${weeks} weeks: `) && steps[3]!.endsWith(`Time: ${FARM_ASSUMPTIONS.minutes_per_step} minutes each week, ${weeks} times.`), label);
           assert.deepEqual(plan.map(x => x.weekly === true), [false, false, false, true, false, false], label);
-          // One deposit figure: every dollar amount other than the chain's fee range, $0 and the $1 peg is the plan capital.
+          // One deposit figure: every dollar amount other than the chain's fee range, $0, the $1 peg and the protocol's
+          // TVL figures (fix 42; always with a K, M or B unit) is the plan capital.
           const [low, high] = chainGas(p.chains[0]), fee = `about $${low}-$${high} on `;
           assert.ok(steps.every(step => step.includes(fee)), label);
-          const rest = steps.join(' ').split(fee).join(' ');
+          const rest = steps.join(' ').split(fee).join(' ').replace(/\$\d+(?:\.\d+)?[KMB]\b/g, 'TVL');
           const amounts = new Set(rest.match(/\$\d+(?:\.\d+)?(?=[ ,.;)-])/g)!.filter(x => !['$0', '$1'].includes(x)));
           assert.deepEqual([...amounts], [`$${farmTotals(p, age).capital}`], label);
           // The stated times sum to the plan's hours.
@@ -1327,6 +1328,26 @@ test('ablation baselines: OLS recovers an exact power law and category medians a
   assert.ok(Math.abs(categoryMedianLooErrors(lone).at(-1)! - Math.log(4)) < 1e-9);
 });
 
+test('plain-curve validation scores the OLS line on the three published protocols: LOO, strict LOO, walk-forward', () => {
+  const day = (i: number) => `2024-0${1 + Math.floor(i / 4)}-1${i % 4}`;
+  // An exact power law: every protocol is error-free.
+  const exact = snapshot([1, 2, 3, 5, 8, 13, 21, 34].map((x, i) => protocol({ slug: `p${i}`, name: `P${i}`, listed_at: day(i), tvl_usd: x * 1e6, mcap_usd: 7 * (x * 1e6) ** .5 })));
+  for (const m of Object.values(plainCurveValidation(exact))) assert.ok(Math.abs(m.median_absolute_log_error!) < 1e-9);
+  // The later half sits e times above the earlier half's line: walk-forward fits the earlier half alone, so every test
+  // peer is off by exactly 1 log point; leave-one-out, refit on both halves, is not.
+  const shifted = snapshot([1, 2, 3, 5, 8, 13, 21, 34].map((x, i) => protocol({ slug: `p${i}`, name: `P${i}`, listed_at: day(i), tvl_usd: x * 1e6, mcap_usd: 7 * (x * 1e6) ** .5 * (i >= 4 ? Math.E : 1) })));
+  const plain = plainCurveValidation(shifted), loo = olsLooErrors(shifted);
+  assert.deepEqual(walkForwardSplit(shifted.protocols).test.map(p => p.slug), ['p4', 'p5', 'p6', 'p7']);
+  assert.ok(Math.abs(plain.walkForward.median_absolute_log_error! - 1) < 1e-9);
+  // Leave-one-out is the ablation's own OLS row; strict recentres those errors by the other peers' median.
+  assert.deepEqual(plain.loo, errorMetric(loo.map(Math.abs)));
+  assert.deepEqual(plain.strict, errorMetric(loo.map((e, i) => Math.abs(e - median(loo.filter((_, j) => j !== i))))));
+  assert.notEqual(plain.strict.median_absolute_log_error, plain.loo.median_absolute_log_error);
+  // With no dated peers there is no walk-forward figure.
+  const undated = snapshot(exact.protocols.map(p => ({ ...p, listed_at: null })));
+  assert.deepEqual(plainCurveValidation(undated).walkForward, { median_absolute_log_error: null, error_factor: null });
+});
+
 test('launch-context age bands have inclusive lower bounds and partition a fixture snapshot', () => {
   assert.deepEqual([0, 364, 365, 729, 730, 1094, 1095, 1824, 1825, 9999, null].map(ageBand), ['<1y', '<1y', '1-2y', '1-2y', '2-3y', '2-3y', '3-5y', '3-5y', '5y+', '5y+', 'unknown']);
   const day = (days: number) => new Date(Date.parse('2025-01-01T00:00:00Z') - days * 86400000).toISOString().slice(0, 10);
@@ -1579,6 +1600,12 @@ test('sealed snapshot: dashboard/1-model.js is the build\'s own emit, and each c
     assert.equal(r.growth_multiplier, Math.round(growthFactor('G2', p.change_7d, 0, MODEL, percentiles.get(p.slug) ?? .5) / M.growth[1] * 1e4) / 1e4, r.slug);
     assert.equal(r.maturity_multiplier, Math.round(maturityFactor('M1', ageDays(snap.as_of, p.listed_at), MODEL, radar.derived_unknown_listed_age_days) / M.maturity[3] * 1e4) / 1e4, r.slug);
   }
+  // radar-21 fix (41): the plain curve's figures on the three protocols, from the pipeline, to 4 places. LOO is the
+  // ablation's OLS row in data.js; all three match the fix-41 measurement (LOO 1.2234, strict 1.3153, walk-forward 1.1118).
+  const plain = plainCurveValidation(snap), r4 = (x: number) => Math.round(x * 1e4) / 1e4;
+  assert.deepEqual(M.ols, [plain.loo, plain.strict, plain.walkForward].map(m => r4(m.median_absolute_log_error!)));
+  assert.equal(plain.loo.median_absolute_log_error, radar.validation.ablation.rows.find((r: any) => r.key === 'ols').median_absolute_log_error);
+  assert.deepEqual(M.ols, [1.2234, 1.3153, 1.1118]);
   assert.equal(M.example.slug, radar.rows.find((r: any) => r.rank === 1).slug);
   assert.equal(M.example.percentile, percentiles.get(M.example.slug) ?? .5);
 });
@@ -1916,6 +1943,75 @@ test('fix 38 changed only the farm fields: every other field of board.json and d
   assert.equal(h({ ...rest, model, rows: rows.map(strip) }), 'b966460c2e04a1ae111951ecd738f21f0eb8165abeab8f808a2f1c0513615fa5');
 });
 
+// ---- radar-21 fix 42: farm steps cite the protocol's own snapshot facts ----
+test('steps 1-4 cite the protocol\'s own chains, 7-day change, TVL and listing age, and nothing the row lacks', () => {
+  const p = protocol({ name: 'Gamma', category: 'Lending', chains: ['Base', 'Ethereum', 'Arbitrum'], tvl_usd: 2.5e8, change_7d: -4.12 });
+  const s = farmSteps(p, 400).map(x => x.text);
+  assert.ok(s[0]!.endsWith('Base is the first of Gamma\'s 3 chains in the snapshot.'), s[0]);
+  assert.ok(s[1]!.startsWith('Before ') && s[1]!.includes('Gamma\'s TVL moved -4.1% in the snapshot\'s last 7 days.'), s[1]);
+  assert.ok(s[2]!.endsWith('$100 is the plan size for Gamma\'s $250.0M TVL ($100M-$1B).'), s[2]);
+  assert.ok(s[3]!.startsWith('Once a week for 4 weeks: ') && s[3]!.endsWith('Gamma was listed 400 days before the snapshot, hence 4 weeks.'), s[3]);
+  // Silent data stays silent: no 7-day sentence without change_7d, the missing listing date said as missing.
+  const q = farmSteps(protocol({ name: 'Gamma', chains: ['Solana'] }), null).map(x => x.text);
+  assert.ok(q[0]!.endsWith('Solana is Gamma\'s only chain in the snapshot.'), q[0]);
+  assert.ok(!/TVL moved/.test(q[1]!), q[1]);
+  assert.ok(q[3]!.endsWith('The snapshot has no listing date for Gamma, hence 4 weeks.'), q[3]);
+  assert.ok(farmSteps(protocol({ chains: [] }), 30)[0]!.text.endsWith('The snapshot lists no chain for Alpha.'));
+  // The band named is the tier planCapital sized the plan on, at every threshold.
+  for (const [tvl, band, capital] of [[9.9e7, 'under $100M', 50], [1e8, '$100M-$1B', 100], [1e9, '$1B-$5B', 150], [5e9, 'over $5B', 250]] as const) {
+    assert.equal(tvlBand(tvl), band);
+    assert.equal(farmTotals(protocol({ tvl_usd: tvl }), 30).capital, capital);
+    assert.match(protocolFacts(protocol({ tvl_usd: tvl }), 30).tvl, new RegExp(`^\\$${capital} is the plan size for Alpha's .* TVL \\(${band.replace(/\$/g, '\\$')}\\)\\.$`));
+  }
+  // The facts change no figure: executions, capital and weeks are what they were.
+  assert.deepEqual(farmSteps(p, 400).map(x => x.weekly === true), [false, false, false, true, false, false]);
+});
+
+test('two protocols on the same chain and category get different steps where their data differs, identical ones where it does not', () => {
+  const base = { name: 'Delta', category: 'Risk Curators', chains: ['Ethereum'] };
+  const plan = (o: Partial<SnapshotProtocol>, age: number | null) => farmSteps(protocol({ ...base, ...o }), age).map(stepText);
+  const a = plan({ tvl_usd: 3e8, change_7d: .1 }, 500);
+  assert.deepEqual(plan({ tvl_usd: 3e8, change_7d: .1 }, 500), a);
+  const tvl = plan({ tvl_usd: 4e8, change_7d: .1 }, 500), age = plan({ tvl_usd: 3e8, change_7d: .1 }, 600), change = plan({ tvl_usd: 3e8, change_7d: -20 }, 500);
+  // Same tier, same capital and weeks: only the sentence that cites the differing field changes.
+  assert.deepEqual(a.map((x, i) => x !== tvl[i]), [false, false, true, false, false, false]);
+  assert.deepEqual(a.map((x, i) => x !== age[i]), [false, false, false, true, false, false]);
+  assert.deepEqual(a.map((x, i) => x !== change[i]), [false, true, false, false, false, false]);
+  const chains = plan({ tvl_usd: 3e8, change_7d: .1, chains: ['Ethereum', 'Base'] }, 500);
+  assert.deepEqual(a.map((x, i) => x !== chains[i]), [true, false, false, false, false, false]);
+});
+
+test('on the sealed board every row\'s steps cite its own row fields, and only farm_steps differs from the fix 41 build', t => {
+  const boardPath = new URL('../out/board.json', import.meta.url), radar = sealedRadar();
+  if (!existsSync(boardPath) || !radar) return t.diagnostic('out/ not built: sealed facts not checked');
+  const money = (x: number) => x >= 1e9 ? `$${(x / 1e9).toFixed(2)}B` : `$${(x / 1e6).toFixed(1)}M`;
+  for (const r of radar.rows) {
+    const s = r.farm_steps.map((x: string) => x.replace(/ Cost: .*$/, ''));
+    assert.ok(s[0].endsWith(r.chains.length > 1 ? `${r.chains[0]} is the first of ${r.name}'s ${r.chains.length} chains in the snapshot.` : `${r.chains[0]} is ${r.name}'s only chain in the snapshot.`), r.slug);
+    assert.equal(s[1].includes(`${r.name}'s TVL moved `), r.change_7d !== null, r.slug);
+    // change_7d is in percent already (the derivation prints it with a % sign), so no TVL can fall more than 100%.
+    if (r.change_7d !== null) assert.ok(r.change_7d > -100 && s[1].includes(`moved ${r.change_7d >= 0 ? '+' : ''}${r.change_7d.toFixed(1)}% in the snapshot's last 7 days.`), r.slug);
+    assert.ok(s[2].endsWith(`$${r.plan_capital_usd} is the plan size for ${r.name}'s ${money(r.tvl_usd)} TVL (${tvlBand(r.tvl_usd)}).`), r.slug);
+    assert.ok(s[3].endsWith(r.age_days === null ? `The snapshot has no listing date for ${r.name}, hence ${r.plan_weeks} weeks.` : `${r.name} was listed ${r.age_days} days before the snapshot, hence ${r.plan_weeks} weeks.`), r.slug);
+  }
+  // sha256 of the rows (and, for data.js, the whole radar) with farm_steps removed, from the fix 41 build (61e45f8).
+  const h = (x: unknown) => createHash('sha256').update(JSON.stringify(x)).digest('hex');
+  const strip = ({ farm_steps, ...rest }: Record<string, any>) => rest;
+  assert.equal(h(JSON.parse(readFileSync(boardPath, 'utf8')).rows.map(strip)), 'c2e94240ca05401c0f196f4b076a5932e266631dc35e8831fb0f76cdf25a9e06');
+  const { rows, ...rest } = JSON.parse(JSON.stringify(radar));
+  assert.equal(h({ ...rest, rows: rows.map(strip) }), '0f783da6043a6f42c3f300f72abb38dc9778f30a11a372abbe60371924a991f3');
+});
+
+test('the drawer\'s held-out strip sets its figures apart for the larger type, its text unchanged', () => {
+  const radar = dashboardFixtureRadar(), { UI } = loadDashboard(radar);
+  const strip = all(UI.detail(radar, radar.rows[0].slug), hasClass('peer-detail')).filter(n => n.textContent.startsWith('Held out:'))[0]!;
+  const figures = all(strip, n => n.tagName === 'b').map(n => n.textContent);
+  assert.deepEqual(figures, [...strip.textContent.matchAll(/×\d+\.\d\d|\d+\.\d%/g)].map(m => m[0]));
+  assert.equal(figures.length, 5);
+  const css = readFileSync(new URL('../dashboard/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.peer-detail b\{font:700 16px\/1 var\(--mono\)/);
+});
+
 // ---- Dashboard (radar-21 fix 39): farm plan column, source order, brief-worded evidence ----
 test('the page h1 names the radar, not the watchlist, and the header stats render statically', () => {
   const radar = dashboardFixtureRadar(), { UI } = loadDashboard(radar), head = UI.header(radar);
@@ -1938,16 +2034,22 @@ test('the dossier text reads code before markup and CSS last: app.js precedes in
   t.diagnostic(`offsets: ${order.map(f => `${f} ${Buffer.byteLength(text.slice(0, at(f)))}`).join(', ')}; chain() ${Buffer.byteLength(text.slice(0, text.indexOf('function chain(')))}, derive() ${Buffer.byteLength(text.slice(0, text.indexOf('function derive(')))}`);
 });
 
-test('the ablation note states that growth and age each lower the held-out error, with the computed figures, and keeps the tie', t => {
-  const check = (radar: Record<string, any>) => {
-    const { UI } = loadDashboard(radar), rows = radar.validation.ablation.rows, k = (key: string) => rows.find((r: any) => r.key === key);
-    const f = (r: any) => `×${r.error_factor.toFixed(2)} (${r.median_absolute_log_error.toFixed(4)})`;
-    const text = all(UI.validation(radar), hasClass('peer-detail')).map(n => n.textContent).find(x => x.startsWith('The 7-day growth'));
-    assert.equal(text, `The 7-day growth and age terms each lower the held-out error: without growth ${f(k('no_growth'))}, without maturity ${f(k('no_maturity'))}, full ${f(k('full'))}. A TVL-only curve ties the full model within noise but uses neither of them.`);
-    return text;
-  };
-  check(dashboardFixtureRadar());
+test('the ablation note compares the shipped model with the plain curve on all three protocols, side by side', t => {
+  const note = (radar: Record<string, any>, model: unknown) => all(loadDashboard(radar, model).UI.validation(radar), hasClass('peer-detail')).map(n => n.textContent).find(x => x.startsWith('Shipped vs plain'));
+  const fx = buildRadar(followUpFixture(), { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: MODEL.unknown_listed_age_days } });
+  const figures = modelFigures(followUpFixture(), fx.board, fx.radar), v = fx.radar.validation as Record<string, any>, f4 = (x: number) => x.toFixed(4);
+  const expected = (o: number[], ahead: string) => `Shipped vs plain OLS curve, log error: leave-one-out ${f4(v.loo.median_absolute_log_error)} vs ${f4(o[0]!)}, tied (difference within noise); strict LOO ${f4(v.loo.strict.median_absolute_log_error)} vs ${f4(o[1]!)}, tied; walk-forward ${f4(v.walkForward.median_absolute_log_error)} vs ${f4(o[2]!)}, ${ahead} ahead. Dropping growth or age raises the error.`;
+  // The walk-forward verdict is computed from the two figures, both ways.
+  const w = v.walkForward.median_absolute_log_error;
+  assert.equal(note(fx.radar, { ...figures, ols: [1, 2, w + .1] }), expected([1, 2, w + .1], 'shipped'));
+  assert.equal(note(fx.radar, { ...figures, ols: [1, 2, w - .1] }), expected([1, 2, w - .1], 'plain curve'));
+  assert.equal(note(fx.radar, figures), expected(figures.ols as number[], w < figures.ols[2]! ? 'shipped' : 'plain curve'));
+  // The superseded reading (growth/age figures and a bare tie with the TVL-only curve) is gone.
+  assert.ok(!loadDashboard(fx.radar, figures).UI.validation(fx.radar).textContent.includes('TVL-only curve ties'));
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed note not checked');
-  assert.ok(check(sealed)!.includes('without growth ×3.70 (1.3079), without maturity ×3.54 (1.2630), full ×3.45 (1.2378)'));
+  assert.equal(note(sealed, committedModel()), 'Shipped vs plain OLS curve, log error: leave-one-out 1.2378 vs 1.2234, tied (difference within noise); strict LOO 1.3191 vs 1.3153, tied; walk-forward 0.9702 vs 1.1118, shipped ahead. Dropping growth or age raises the error.');
+  // The fixed words are backed by the sealed figures: removing growth or age raises the error.
+  const k = (key: string) => sealed.validation.ablation.rows.find((r: any) => r.key === key);
+  assert.ok(k('no_growth').delta_vs_full > 0 && k('no_maturity').delta_vs_full > 0);
 });

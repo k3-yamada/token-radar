@@ -3,7 +3,8 @@
 
   function factor(m) { return m.error_factor == null ? '—' : '×' + m.error_factor.toFixed(2); }
   function nominal(b) { return (100 * b.nominal_coverage).toFixed(0) + '%'; }
-  function error(m) { return m.median_absolute_log_error == null ? '—' : m.median_absolute_log_error.toFixed(4); }
+  function e4(x) { return x == null ? '—' : x.toFixed(4); }
+  function error(m) { return e4(m.median_absolute_log_error); }
 
   function valTiles(v, parts) {
     var w = v.walkForward, bands = v.coverage.bands, tiles = el('div', 'vals');
@@ -23,7 +24,11 @@
   function valNote(v) { return note('Over all ' + v.loo.count + ' tokenized peers with a market cap, unclamped; smaller error is better; coverage against a nominal ' + nominal(v.coverage.bands[0]) + '.'); }
 
   function valLine(v) {
-    return note('Held out: median error factor (×1 = exact) leave-one-out ' + factor(v.loo) + ' (unclamped, each peer priced without itself; strict ' + factor(v.loo.strict) + '), walk-forward ' + factor(v.walkForward) + ' (earlier peers price later); peers inside ' + v.coverage.bands.map(function (b) { return nominal(b) + ' band ' + pct(b.held_out.coverage); }).join(', ') + '.');
+    var t = ['Held out: median error factor (×1 = exact) leave-one-out ', factor(v.loo), ' (unclamped, each peer priced without itself; strict ', factor(v.loo.strict), '), walk-forward ', factor(v.walkForward), ' (earlier peers price later); peers inside '], p = note('');
+    v.coverage.bands.forEach(function (b, i) { if (i) t.push(', '); t[t.length - 1] += nominal(b) + ' band '; t.push(pct(b.held_out.coverage)); });
+    t.push('.');
+    t.forEach(function (x, i) { p.append(i % 2 ? el('b', '', x) : x); });
+    return p;
   }
 
   function f4(x) { return x.toFixed(4); }
@@ -406,12 +411,14 @@
   }
 
   function validation(d) {
-    var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div'), a = {};
-    v.ablation.rows.forEach(function (r) { a[r.key] = factor(r) + ' (' + error(r) + ')'; });
+    var v = d.validation, s = el('section', 'below validation'), tiles = valTiles(v, 3), pair = el('div', 'pair'), left = el('div'), right = el('div'), o = (global.RADAR_MODEL || {}).ols, w = v.walkForward.median_absolute_log_error;
     s.append(section('Validation', 'Computed at build time from the sealed snapshot, for the exact model the board ships.'));
     left.append(tableOf(['Ablation, same leave-one-out', 'Error', 'Factor', 'vs full'], v.ablation.rows.map(function (r) {
       return [r.label, error(r), factor(r), r.key === 'full' ? '—' : (r.delta_vs_full > 0 ? '+' : '−') + Math.abs(r.delta_vs_full).toFixed(4) + (r.beats_full ? ' · within noise' : '')];
-    }), 1), note('The 7-day growth and age terms each lower the held-out error: without growth ' + a.no_growth + ', without maturity ' + a.no_maturity + ', full ' + a.full + '. A TVL-only curve ties the full model within noise but uses neither of them.'));
+    }), 1));
+    if (o) left.append(note('Shipped vs plain OLS curve, log error: ' + [[v.loo, 'leave-one-out', 'tied (difference within noise)'], [v.loo.strict, 'strict LOO', 'tied'], [v.walkForward, 'walk-forward', o[2] == null ? '—' : (w < o[2] ? 'shipped' : 'plain curve') + ' ahead']].map(function (x, i) {
+      return x[1] + ' ' + error(x[0]) + ' vs ' + e4(o[i]) + ', ' + x[2];
+    }).join('; ') + '. Dropping growth or age raises the error.'));
     right.append(tableOf(['Listed age', 'Protocols', 'With token', 'Share'], d.launchContext.bands.map(function (b) {
       return [b.band, b.n, b.with_token_record, pct(b.share_with_token_record)];
     }), 1), note('Launch context: ' + LC_LABEL + '.'));
@@ -440,9 +447,9 @@
     var explanation = el('div', 'method-copy');
     [
       ['', ['Each live protocol is estimated from the rest. The band is the middle half of those errors per basis, widened just enough to cover half of them: in-sample coverage is ' + pct(d.calibration_backtest.band_coverage) + ' by construction (' + pct(d.validation.coverage.bands[0].held_out.coverage) + ' held out).']],
-      ['Basis and centre', ['A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '.', 'Missing listed_at ages use the ' + unknownAgeSource + ' (' + d.derived_unknown_listed_age_days + ' days). Peer share is weighted by TVL; detail shows the protocol count.']],
-      ['Bands and coverage', ['The board median band ratio is ' + boardMedianBandRatio.toFixed(2) + '×. Separate band multipliers are calibrated for category rows (' + widths.category.toFixed(2) + '×) and global-anchored rows (' + widths.global_anchored.toFixed(2) + '×). Category coverage is ' + pct(basis.category.band_coverage) + ' and global-anchored coverage is ' + pct(basis.global_anchored.band_coverage) + '.']],
-      ['Rank quality', ['The ' + d.calibration_backtest.peers_evaluated + ' leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + '; selection shrink ' + (d.selection_shrink.adopted ? 'was adopted' : 'was not adopted') + '.', 'Each rank carries a range from resampling the calibration ratios ' + d.resample_count + ' times. Wide ranges mark ranks the evidence cannot separate. Leaving out any single calibration peer keeps on average ' + pct(d.top20_jackknife_overlap) + ' of the top 20 in place.']],
+      ['Basis and centre', ['A category with one live peer uses the global-anchored basis. A protocol carrying a token symbol or Gecko ID is treated as recording a token and is never ranked. Zero market caps count as no evidence; the global set excludes ' + m.global_excluded_categories.join(', ') + '.', 'Missing listed_at ages use the ' + unknownAgeSource + ' (' + d.derived_unknown_listed_age_days + ' days).']],
+      ['Bands and coverage', ['Board median band ratio: ' + boardMedianBandRatio.toFixed(2) + '×. Band multipliers by basis: category ' + widths.category.toFixed(2) + '× (' + pct(basis.category.band_coverage) + ' covered), global-anchored ' + widths.global_anchored.toFixed(2) + '× (' + pct(basis.global_anchored.band_coverage) + ').']],
+      ['Rank quality', ['The ' + d.calibration_backtest.peers_evaluated + ' leave-one-out estimates have a Spearman rank correlation of ' + d.rank_quality.spearman.toFixed(3) + ' with realized market caps; ' + d.rank_quality.top10_overlap + ' of the predicted top 10 are in the realized top 10. ' + biasText + '; selection shrink was ' + (d.selection_shrink.adopted ? '' : 'not ') + 'adopted.', 'Each rank carries a range from resampling the calibration ratios ' + d.resample_count + ' times. Dropping any one calibration peer keeps on average ' + pct(d.top20_jackknife_overlap) + ' of the top 20 in place.']],
       ['Grades', ['Grades are support-and-precision labels: A needs at least ' + needs(d.grade_rules.A, ' calibration') + '; B needs at least ' + needs(d.grade_rules.B, '') + '; all others are C.', 'In leave-one-out backtesting, A carried ' + gradeCarried('A', ' estimates', ' median error factor') + '; B carried ' + gradeCarried('B', '', ' error factor') + '; C carried ' + gradeCarried('C', '', ' error factor') + '.']]
     ].forEach(function (x) {
       if (x[0]) explanation.appendChild(el('h3', '', x[0]));

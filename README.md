@@ -31,13 +31,21 @@ Ablation, same leave-one-out metric over the same 128 peers, each variant recali
 | Variant | Median abs log error | Factor | vs full |
 | --- | --- | --- | --- |
 | Full shipped model | 1.2378 | ×3.45 | |
-| Plain log-log OLS, ln(mcap) on ln(TVL) | 1.2234 | ×3.40 | −0.0144 (beats the full model) |
+| Plain log-log OLS, ln(mcap) on ln(TVL) | 1.2234 | ×3.40 | −0.0144 (within noise) |
 | Without the growth factor | 1.3079 | ×3.70 | +0.0702 |
 | Without the maturity factor | 1.2630 | ×3.54 | +0.0252 |
 | Without the size adjustment | 1.5130 | ×4.54 | +0.2753 |
 | Category medians only | 1.5876 | ×4.89 | +0.3498 |
 
-A plain curve of market cap on TVL does 0.0144 better than the shipped model, which is within noise on 128 peers: the shipped model is not more accurate than that curve. The extra terms are kept for the size effect, which carries the model (removing it costs 0.2753), and for the per-basis bands; growth and maturity help modestly (0.0702 and 0.0252).
+The plain curve is also scored on the other two protocols (`plainCurveValidation`, emitted in `dashboard/1-model.js` beside the model constants):
+
+| Protocol | Shipped model | Plain OLS curve | Reading |
+| --- | --- | --- | --- |
+| Leave-one-out | 1.2378 | 1.2234 | tied: the 0.0144 gap is within noise |
+| Strict leave-one-out | 1.3191 | 1.3153 | tied |
+| Walk-forward (47 later peers) | 0.9702 | 1.1118 | shipped model ahead |
+
+The two are tied on leave-one-out: a paired bootstrap over the 128 peers, run outside the build, puts the gap well inside its sampling noise. The shipped model is ahead on the walk-forward. Removing the size effect costs 0.2753, so it carries the model; growth and maturity help modestly (0.0702 and 0.0252).
 
 Launch context. The dashboard shows, for each row's age band, the share of all 758 protocols of that age that already record a token: under 1 year 32.5% (n=160), 1-2 years 38.3% (n=183), 2-3 years 54.7% (n=139), 3-5 years 79.4% (n=155), 5 years and over 75.0% (n=8), unknown age 78.8% (n=113). This is a cross-sectional share shown as context. It is deliberately not used as a launch probability and enters neither the value nor the rank, because it is right-censored (a protocol with no token today may still launch one) and its cohort cells are small.
 

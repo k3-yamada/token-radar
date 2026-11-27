@@ -5,7 +5,7 @@
 // Farm plans: FARM, farmCost(); per row in board(), steps in detail().
 // Page: sorting and filters, state.js; Prev / Next, app.js.
 // Validation: valTiles(), valLine(), validation().
-window.RADAR_MODEL={"size_center":17.078708015985754,"size_slope":-0.5951318419463234,"global":[94,-1.423214854075509,2.960093621168936],"k":[6,2,24,4],"growth":[0.35,1.14269588313413],"maturity":[0.75,0.5,1460,1.166787877069316],"amp":[1,1],"bias":1.2740248278850528,"unknown_age":677,"example":{"slug":"sentora-curator","percentile":0.9256308100929614},"categories":{
+window.RADAR_MODEL={"size_center":17.078708015985754,"size_slope":-0.5951318419463234,"global":[94,-1.423214854075509,2.960093621168936],"k":[6,2,24,4],"growth":[0.35,1.14269588313413],"maturity":[0.75,0.5,1460,1.166787877069316],"amp":[1,1],"bias":1.2740248278850528,"unknown_age":677,"ols":[1.2234,1.3153,1.1118],"example":{"slug":"sentora-curator","percentile":0.9256308100929614},"categories":{
 "Basis Trading":[7,-0.6761357251093777,1.1309404201505373],
 "CDP":[3,-1.393751405138921],
 "Chain":[1,0.743939562503348],

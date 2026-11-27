@@ -572,6 +572,19 @@ export function walkForwardSplit<T extends { slug: string; listed_at: string | n
 
 type FactorVariants = { fitAmplitudes?: boolean; derivedUnknownAge?: boolean };
 
+/** The walk-forward split of the tokenized peers and the training snapshot: every protocol except the later-half and undated peers. */
+function walkForwardTrain(snapshot: Snapshot) {
+  const split = walkForwardSplit(snapshot.protocols.filter(isLive));
+  const trainSlugs = new Set(split.train.map(p => p.slug));
+  const train: Snapshot = { ...snapshot, protocols: snapshot.protocols.filter(p => !isLive(p) || trainSlugs.has(p.slug)) };
+  return { split, train };
+}
+
+/** Each error minus the median error of the other peers: the strict protocol's bias correction, which never sees the held-out peer. */
+function recentreByOthers(errors: number[]): number[] {
+  return errors.map((error, index) => error - median(errors.filter((_, other) => other !== index)));
+}
+
 /**
  * Walk-forward test of the shipped procedure. The training snapshot keeps every protocol except the tokenized peers
  * outside the earlier half (the later half and the undated peers), so no test market cap reaches the size slope, the
@@ -579,9 +592,7 @@ type FactorVariants = { fitAmplitudes?: boolean; derivedUnknownAge?: boolean };
  * refit on the earlier half alone. Each later-half peer is then predicted once and scored against that band.
  */
 export function walkForward(snapshot: Snapshot, variants: FactorVariants = {}) {
-  const split = walkForwardSplit(snapshot.protocols.filter(isLive));
-  const trainSlugs = new Set(split.train.map(p => p.slug));
-  const train: Snapshot = { ...snapshot, protocols: snapshot.protocols.filter(p => !isLive(p) || trainSlugs.has(p.slug)) };
+  const { split, train } = walkForwardTrain(snapshot);
   const base = { split_date: split.split_date, dated_peers: split.train.length + split.test.length, undated_peers_excluded: split.undated.length, train_count: split.train.length, test_count: split.test.length };
   if (!split.train.length || !split.test.length) return { ...base, median_absolute_log_error: null, error_factor: null, median_log_error: null, band_coverage: null, band_nominal_coverage: BAND_TARGET_COVERAGE };
   const sizeAdjustment: SizeAdjustment = { mode: 'global', slope: globalSizeAdjustment(train).slope };
@@ -617,12 +628,33 @@ export function olsLooErrors(snapshot: Snapshot): number[] {
   const live = snapshot.protocols.filter(isLive);
   return live.map(peer => {
     const rest = live.filter(p => p.slug !== peer.slug);
-    if (!rest.length) return 0;
-    const slope = leastSquaresSlope(rest);
-    const meanX = rest.reduce((sum, p) => sum + Math.log(p.tvl_usd), 0) / rest.length;
-    const meanY = rest.reduce((sum, p) => sum + Math.log(p.mcap_usd!), 0) / rest.length;
-    return meanY + slope * (Math.log(peer.tvl_usd) - meanX) - Math.log(peer.mcap_usd!);
+    return rest.length ? olsLogError(rest, peer) : 0;
   });
+}
+
+/** ln(predicted / realized) market cap of `peer` under the least-squares line ln(mcap) = a + b ln(TVL) fitted on `rows`. */
+function olsLogError(rows: SnapshotProtocol[], peer: SnapshotProtocol): number {
+  const slope = leastSquaresSlope(rows);
+  const meanX = rows.reduce((sum, p) => sum + Math.log(p.tvl_usd), 0) / rows.length;
+  const meanY = rows.reduce((sum, p) => sum + Math.log(p.mcap_usd!), 0) / rows.length;
+  return meanY + slope * (Math.log(peer.tvl_usd) - meanX) - Math.log(peer.mcap_usd!);
+}
+
+/**
+ * The plain log-log OLS curve scored on the three protocols the shipped model is published on, over the same peers and
+ * splits: leave-one-out (line refit without the held-out peer; the ablation's `ols` row), strict leave-one-out (those
+ * errors recentred by the other peers' median, the strict protocol's bias correction) and walk-forward (line fitted on
+ * the earlier half's peers only, the later half predicted once). Emitted with the model constants in 1-model.js.
+ */
+export function plainCurveValidation(snapshot: Snapshot) {
+  const loo = olsLooErrors(snapshot);
+  const { split, train } = walkForwardTrain(snapshot);
+  const trainPeers = train.protocols.filter(isLive);
+  return {
+    loo: errorMetric(loo.map(Math.abs)),
+    strict: errorMetric(recentreByOthers(loo).map(Math.abs)),
+    walkForward: split.train.length && split.test.length ? errorMetric(split.test.map(peer => Math.abs(olsLogError(trainPeers, peer)))) : { median_absolute_log_error: null, error_factor: null }
+  };
 }
 
 /**
@@ -651,7 +683,7 @@ export function validationReport(snapshot: Snapshot, shipped: ReturnType<typeof 
   // Strict variant: the size slope is refit inside every fold and each peer's bias correction is the median error of
   // the other peers, so neither constant has seen the held-out market cap.
   const strictRaw = backtest(snapshot, { sizeAdjustment, ...variants, refitSlope: true }).map(row => row.logError);
-  const strict = strictRaw.map((error, index) => error - median(strictRaw.filter((_, other) => other !== index)));
+  const strict = recentreByOthers(strictRaw);
   const arm = (shapes: FactorShapes, adjustment: SizeAdjustment | undefined) => absolute(calibrateBacktest(snapshot, shapes, adjustment, variants).observations);
   const ablationRows: Array<[string, string, number[]]> = [
     ['full', 'Full shipped model', absolute(shipped.observations)],

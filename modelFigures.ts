@@ -1,5 +1,5 @@
 import { calibrate } from './lib/domain/calibration.ts';
-import { globalSizeAdjustment } from './lib/domain/backtest.ts';
+import { globalSizeAdjustment, plainCurveValidation } from './lib/domain/backtest.ts';
 import { ageDays, changePercentiles, growthFactor, maturityFactor } from './lib/domain/estimate.ts';
 import { interquartileRange, median } from './lib/domain/statistics.ts';
 import { MODEL, type BoardRow, type RadarData, type Snapshot } from './lib/domain/types.ts';
@@ -25,6 +25,9 @@ export function modelFigures(snapshot: Snapshot, board: BoardRow[], radar: Radar
     if (s) categories[c!] = s.count < 4 ? [s.count, s.median] : [s.count, s.median, interquartileRange(cal.samples.get(c!)!)];
   }
   const top = board[0]!;
+  // The plain log-log OLS curve's median absolute log error on [leave-one-out, strict, walk-forward], to 4 places, shown
+  // beside the shipped model's own figures from data.js.
+  const plain = plainCurveValidation(snapshot), r4 = (x: number | null) => x === null ? null : Math.round(x * 1e4) / 1e4;
   return {
     size_center: size.center,
     size_slope: size.slope,
@@ -35,6 +38,7 @@ export function modelFigures(snapshot: Snapshot, board: BoardRow[], radar: Radar
     amp,
     bias: radar.bias_correction_factor,
     unknown_age: radar.derived_unknown_listed_age_days,
+    ols: [plain.loo, plain.strict, plain.walkForward].map(m => r4(m.median_absolute_log_error)),
     example: { slug: top.slug, percentile: percentiles.get(top.slug) ?? .5 },
     categories
   };

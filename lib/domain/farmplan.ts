@@ -335,10 +335,32 @@ const CHAIN_STEPS: Record<ChainKind, (n: string, c: string, fee: string) => { op
     tidyCost: `$0 to read; ${fee} for each one you remove` })
 };
 
+/** TVL band of `planCapital`'s tiers, in the same order and at the same thresholds. */
+export function tvlBand(tvl: number): string {
+  return tvl >= 5e9 ? 'over $5B' : tvl >= 1e9 ? '$1B-$5B' : tvl >= 1e8 ? '$100M-$1B' : 'under $100M';
+}
+const money = (x: number) => x >= 1e9 ? `$${(x / 1e9).toFixed(2)}B` : x >= 1e6 ? `$${(x / 1e6).toFixed(1)}M` : `$${(x / 1e3).toFixed(1)}K`;
+
+/**
+ * The protocol's own facts each plan cites, every one a field of its snapshot row: its listed chains (step 1), its
+ * 7-day TVL change, already in percent as DefiLlama gives it (step 2), its TVL, which sets the plan capital (step 3), and its listing age, which sets the plan
+ * weeks (step 4). A field the snapshot leaves empty is said to be missing, never filled in.
+ */
+export function protocolFacts(p: SnapshotProtocol, age: number | null) {
+  const n = p.name, c = p.chains[0], k = p.chains.length;
+  return {
+    chains: !c ? `The snapshot lists no chain for ${n}.` : k > 1 ? `${c} is the first of ${n}'s ${k} chains in the snapshot.` : `${c} is ${n}'s only chain in the snapshot.`,
+    change: p.change_7d === null ? '' : ` ${n}'s TVL moved ${p.change_7d >= 0 ? '+' : ''}${p.change_7d.toFixed(1)}% in the snapshot's last 7 days.`,
+    tvl: `$${planCapital(p)} is the plan size for ${n}'s ${money(p.tvl_usd)} TVL (${tvlBand(p.tvl_usd)}).`,
+    age: age === null ? `The snapshot has no listing date for ${n}, hence ${planWeeks(age)} weeks.` : `${n} was listed ${age} days before the snapshot, hence ${planWeeks(age)} weeks.`
+  };
+}
+
 /**
  * The farm plan, in the order it is done: open the app, check the risks, deposit, repeat weekly, the category's one-off
- * engagement, exit. Every amount is `planCapital`; every step states `minutes_per_step` and the fee range of the row's
- * primary chain (`chainGas`), so the plan's executions, hours and costs are the sums of what the steps say.
+ * engagement, exit. Steps 1-4 each cite one of the protocol's own facts (`protocolFacts`). Every amount is
+ * `planCapital`; every step states `minutes_per_step` and the fee range of the row's primary chain (`chainGas`), so
+ * the plan's executions, hours and costs are the sums of what the steps say.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const c = p.chains[0] ?? 'its main chain';
@@ -354,11 +376,12 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const gas = `${kind === 'evm' ? 'gas' : 'network fee'} about $${low}-$${high} on ${c}`;
   const w = CHAIN_STEPS[kind](n, c, gas);
   const minutes = `${FARM_ASSUMPTIONS.minutes_per_step} minutes`;
+  const f = protocolFacts(p, age);
   return [
-    { text: w.open, cost: w.openCost, time: minutes },
-    { text: `${t.risk} ${w.tidy}`, cost: w.tidyCost, time: minutes },
-    { text: t.action, cost: `${a} of working capital, returned when you exit, plus ${gas} and any protocol fee the app shows before you confirm`, time: minutes },
-    { text: `Once a week for ${weeks} weeks: ${t.weekly[0]!.toLowerCase()}${t.weekly.slice(1)} Record each transaction hash, date, amount and fee.`, cost: `${gas} per visit; no new capital`, time: `${minutes} each week, ${weeks} times`, weekly: true },
+    { text: `${w.open} ${f.chains}`, cost: w.openCost, time: minutes },
+    { text: `${t.risk}${f.change} ${w.tidy}`, cost: w.tidyCost, time: minutes },
+    { text: `${t.action} ${f.tvl}`, cost: `${a} of working capital, returned when you exit, plus ${gas} and any protocol fee the app shows before you confirm`, time: minutes },
+    { text: `Once a week for ${weeks} weeks: ${t.weekly[0]!.toLowerCase()}${t.weekly.slice(1)} Record each transaction hash, date, amount and fee. ${f.age}`, cost: `${gas} per visit; no new capital`, time: `${minutes} each week, ${weeks} times`, weekly: true },
     { text: t.once, cost: `$0 to read; ${gas} for each transaction`, time: minutes },
     { text: `At the end of week ${weeks}, ${t.exit}. Record the final transaction, and check any rewards or points page ${n} publishes.`, cost: gas, time: minutes }
   ];
