@@ -350,7 +350,7 @@ export function protocolFacts(p: SnapshotProtocol, age: number | null) {
   const n = p.name, c = p.chains[0], k = p.chains.length;
   return {
     chains: !c ? `The snapshot lists no chain for ${n}.` : k > 1 ? `${c} is the first of ${n}'s ${k} chains in the snapshot.` : `${c} is ${n}'s only chain in the snapshot.`,
-    change: p.change_7d === null ? '' : ` ${n}'s TVL moved ${p.change_7d >= 0 ? '+' : ''}${p.change_7d.toFixed(1)}% in the snapshot's last 7 days.`,
+    change: p.change_7d === null ? '' : ` ${n}'s TVL moved ${p.change_7d >= 0 ? '+' : ''}${p.change_7d.toFixed(1).replace(/^-0\.0$/, '0.0')}% in the snapshot's last 7 days.`,
     tvl: `$${planCapital(p)} is the plan size for ${n}'s ${money(p.tvl_usd)} TVL (${tvlBand(p.tvl_usd)}).`,
     age: age === null ? `The snapshot has no listing date for ${n}, hence ${planWeeks(age)} weeks.` : `${n} was listed ${age} days before the snapshot, hence ${planWeeks(age)} weeks.`
   };

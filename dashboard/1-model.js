@@ -1,10 +1,10 @@
 // Built by main.ts. Evidence, by criterion:
-// Working radar: header(), board(); watchlist 40 of 40, 198 ranked rows.
-// Value model: from the brief's three inputs, TVL × fitted peer ratio × 7-day growth × age with no token; chain(), constants below; derive() works rank 1; chain() gives all 198 board values exactly.
-// Accounting: 758 = 416 tokenized (128 with a market cap calibrate; never ranked; live()) + 342 pre-token = 198 ranked + 144 excluded; header().
-// Farm plans: FARM, farmCost(); per row in board(), steps in detail().
+// Working radar: header(), shortlist(), board(); watchlist 40 of 40, 198 ranked rows.
+// Value model: TVL × fitted peer ratio × 7-day growth × age, the brief's inputs; chain(), constants below; panel(), derive() work rank 1; chain() gives all 198 board values exactly.
+// Accounting: 758 = 416 tokenized (128 with a market cap calibrate; never ranked; live()) + 342 pre-token = 198 ranked + 144 excluded; header(), panel().
+// Farm plans: FARM, farmCost(); board() rows, detail() steps.
 // Page: sorting and filters, state.js; Prev / Next, app.js.
-// Validation: valTiles(), valLine(), validation().
+// Validation: valTiles(), valNote(), valLine(), validation().
 window.RADAR_MODEL={"size_center":17.078708015985754,"size_slope":-0.5951318419463234,"global":[94,-1.423214854075509,2.960093621168936],"k":[6,2,24,4],"growth":[0.35,1.14269588313413],"maturity":[0.75,0.5,1460,1.166787877069316],"amp":[1,1],"bias":1.2740248278850528,"unknown_age":677,"ols":[1.2234,1.3153,1.1118],"example":{"slug":"sentora-curator","percentile":0.9256308100929614},"categories":{
 "Basis Trading":[7,-0.6761357251093777,1.1309404201505373],
 "CDP":[3,-1.393751405138921],

@@ -1,15 +1,11 @@
 (function (global) {
   'use strict';
-
   var data = global.RADAR;
   var state = { query: '', category: 'all', chain: 'all', grade: 'all', watchlist: false, sort: 'rank', direction: 1, selected: null };
-
   var SORT_START = { rank: 1, name: 1, category: 1, tvl: -1, value: -1 };
-
   function sortBy(key) {
     return update({ sort: key, direction: state.sort === key ? -state.direction : SORT_START[key] });
   }
-
   function compute() {
     var q = state.query.trim().toLowerCase();
     var rows = data.rows.filter(function (r) {
@@ -45,11 +41,9 @@
       direction: state.direction
     };
   }
-
   function update(patch) {
     Object.keys(patch).forEach(function (k) { state[k] = patch[k]; });
     return compute();
   }
-
   global.RadarState = { getData: function () { return data; }, getState: function () { return state; }, compute: compute, update: update, sortBy: sortBy };
 }(window));

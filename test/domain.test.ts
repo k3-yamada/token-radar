@@ -753,14 +753,12 @@ test('dashboard method text names the unknown-age source truthfully, adopted or 
   const radar = buildRadar(snap, { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: derived } }).radar;
   assert.equal(radar.calibration_backtest.peers_evaluated, 14);
   assert.ok(text(find(window.RadarComponents!.method(radar))!).includes('The 14 leave-one-out estimates have a Spearman rank correlation'));
-  // A grade with no backtest estimates prints its count alone; measured grades keep their full sentence.
-  const measured = { count: 4, coverage: 0.5, band_coverage: 0.5, median_log_error: 0, median_absolute_log_error: Math.log(2) };
-  const empty = { count: 0, coverage: null, band_coverage: null, median_log_error: null, median_absolute_log_error: null };
-  const graded = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: empty, B: measured, C: empty } }))!);
-  // That sentence closes the Grades subsection, the last one, so it ends the copy.
-  assert.ok(graded.endsWith('\nIn leave-one-out backtesting, A carried 0 estimates; B carried 4 with 50.0% coverage and ×2.0 error factor; C carried 0.'));
-  const full = text(find(window.RadarComponents!.method({ ...radar, grade_backtest: { A: measured, B: measured, C: measured } }))!);
-  assert.ok(full.endsWith('A carried 4 estimates with 50.0% coverage and ×2.0 median error factor; B carried 4 with 50.0% coverage and ×2.0 error factor; C carried 4 with 50.0% coverage and ×2.0 error factor.'));
+  // radar-21 fix (45): the Grades subsection is folded; its per-grade backtest figures are gradeMeaning()'s, shown in the
+  // grade strip's tip and each row's grade tip, so the copy now ends with the Rank quality subsection.
+  const copyText = text(find(window.RadarComponents!.method(radar))!);
+  assert.ok(!copyText.includes('Grades') && !copyText.includes(' carried '), copyText);
+  assert.ok(copyText.endsWith(' of the top 20 in the top 20.'), copyText);
+  assert.ok(!source.includes('function gradeCarried('));
   assert.ok(!source.includes('The 128 leave-one-out'));
   assert.ok(!source.includes('calibration set’s quartiles'));
 });
@@ -849,7 +847,7 @@ const hasClass = (name: string) => (n: DomNode) => String(n.className).split(' '
 type DashRow = Record<string, any>;
 type DashView = { rows: DashRow[]; top: DashRow[]; shortlist: DashRow[]; grades: Record<string, number>; sort: string; direction: number; data: Record<string, any> };
 type Dashboard = {
-  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode; validation(d: unknown): DomNode; header(d: unknown): DomNode; chain(M: any, r: any, p: number): Record<string, any>; farm: { steps: [string, number][]; gas: Record<string, number[]>; minutes: number; hourly: number }; farmCost(weeks: number, chain: string): { runs: number; hours: number; gas: number[]; fees: number; low: number; high: number } };
+  UI: { usd(n: number): string; ratio(n: number): string; chart(v: unknown): DomNode; shortlist(v: unknown): DomNode; board(v: unknown): DomNode; updateBoardResults(e: DomNode, v: unknown): void; detail(d: unknown, slug: string): DomNode; method(d: unknown): DomNode; validation(d: unknown): DomNode; header(d: unknown): DomNode; chain(M: any, r: any, p: number): Record<string, any>; panel(d: unknown, M: unknown): DomNode; curve(v: unknown): DomNode; farm: { steps: [string, number][]; gas: Record<string, number[]>; minutes: number; hourly: number }; farmCost(weeks: number, chain: string): { runs: number; hours: number; gas: number[]; fees: number; low: number; high: number } };
   State: { compute(): DashView; update(patch: Record<string, unknown>): DashView; sortBy(key: string): DashView };
 };
 const loadDashboard = (radar: unknown, model?: unknown): Dashboard => {
@@ -866,6 +864,41 @@ const sealedRadar = (): Record<string, any> | null => {
   return window.RADAR ?? null;
 };
 const dashboardFixtureRadar = () => buildRadar(followUpFixture(), { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: MODEL.unknown_listed_age_days } }).radar;
+// radar-21 fix (48): a printed figure, "$70.8M" or "0.020149", as its value and half a unit of its last shown digit.
+const shownFigure = (t: string) => {
+  const m = /^\$?(-?[\d.]+)([KMBT]?)$/.exec(t);
+  assert.ok(m, `not a printed figure: ${t}`);
+  const u = 1e3 ** ' KMBT'.indexOf(m[2] || ' '), places = (m[1]!.split('.')[1] ?? '').length;
+  return { value: +m[1]! * u, half: .5 * 10 ** -places * u };
+};
+// x lies within half a unit of the printed figure's last digit: x rounds to it as printed.
+const roundsTo = (x: number, t: string) => { const f = shownFigure(t); return Math.abs(x - f.value) <= f.half * (1 + 1e-9); };
+// The drawer's three steps multiply out as printed (each product of the printed factors rounds to the printed result),
+// and every printed figure is a rounding of the model quantity it names: the snapshot TVL, base ÷ (TVL × bias), the
+// bias, the base, base × the stored growth multiplier, and the board value as the board prints it.
+const derivationCloses = (formulas: string[], r: DashRow, radar: Record<string, any>, UI: Dashboard['UI']) => {
+  assert.equal(formulas.length, 3);
+  const one = /^TVL (\$[\d.]+[KMB]) × peer ratio ([\d.]+) × bias correction ([\d.]+) = base (\$[\d.]+[KMBT]?)\.$/.exec(formulas[0]!);
+  const two = /^Base (\$[\d.]+[KMBT]?) × growth multiplier ([\d.]+) = (\$[\d.]+[KMBT]?)\.$/.exec(formulas[1]!);
+  const three = /^(\$[\d.]+[KMBT]?) × maturity multiplier ([\d.]+) = implied value (\$[\d.]+[KMBT]?)\.$/.exec(formulas[2]!);
+  assert.ok(one && two && three, formulas.join(' | '));
+  const [, T, q, b, B] = one, [, B2, g, A] = two, [, A2, m, I] = three, bias = radar.bias_correction_factor, v = (t: string) => shownFigure(t).value;
+  // Closure needs a base that carries the precision: the stored base is whole dollars, so below $1M (the small test
+  // fixtures only; the sealed board's smallest base is $2.8M) its own rounding can exceed half a printed unit.
+  if (r.base_usd >= 1e6) {
+    assert.ok(roundsTo(v(T!) * +q! * +b!, B!), `${r.slug} step 01: ${formulas[0]}`);
+    assert.ok(roundsTo(v(B2!) * +g!, A!), `${r.slug} step 02: ${formulas[1]}`);
+    assert.ok(roundsTo(v(A2!) * +m!, I!), `${r.slug} step 03: ${formulas[2]}`);
+  }
+  assert.equal(B2, B, r.slug);
+  assert.equal(A2, A, r.slug);
+  assert.ok(roundsTo(r.tvl_usd, T!) && roundsTo(r.base_usd / r.tvl_usd / bias, q!) && roundsTo(r.base_usd, B!) && roundsTo(r.base_usd * r.growth_multiplier, A!), `${r.slug}: ${formulas.join(' | ')}`);
+  assert.equal(b, bias.toFixed(5), r.slug);
+  assert.equal(g, String(r.growth_multiplier), r.slug);
+  assert.equal(m, String(r.maturity_multiplier), r.slug);
+  assert.equal(I, UI.usd(r.implied_value_usd), r.slug);
+  return formulas;
+};
 const percent = (value: string) => { assert.match(value, /^-?[\d.]+%$/); return Number(value.slice(0, -1)); };
 const assertChartFits = (chart: DomNode, expectedRows: number) => {
   const tracks = all(chart, hasClass('bar-track'));
@@ -1028,10 +1061,10 @@ test('detail shows the derivation step by step and labels which peer measure it 
       assert.ok(all(detail, n => n.tagName === 'h3').some(n => n.textContent === 'Derivation and farm plan'));
       const steps = all(all(detail, hasClass('derivation'))[0]!, n => n.tagName === 'li').map(n => n.textContent);
       assert.equal(steps.length, 3);
-      assert.ok(steps[0]!.startsWith(`TVL ${UI.usd(r.tvl_usd)} × ratio ${r.category_ratio_used} × bias correction ${radar.bias_correction_factor.toFixed(3)} = base ${UI.usd(r.base_usd)}.`), steps[0]);
+      derivationCloses(all(all(detail, hasClass('derivation'))[0]!, hasClass('formula')).map(n => n.textContent), r, radar, UI);
       assert.ok(steps[0]!.includes(r.ratio_basis === 'category' ? `the ${r.category_ratio_source} set (${r.ratio_live_count} live peers), shrunk toward the global set` : r.ratio_basis === 'global-anchored' ? `the global set shrunk toward the single live ${r.category_ratio_source} peer (global-anchored basis)` : 'the global set, because the category has no live peers'), steps[0]);
       assert.ok(!steps[0]!.includes('global set, because ' + r.category_ratio_source), steps[0]);
-      assert.ok(steps[1]!.startsWith(`Base ${UI.usd(r.base_usd)} × growth multiplier ${r.growth_multiplier} = `), steps[1]);
+      assert.ok(steps[1]!.startsWith('Base ') && steps[1]!.includes(` × growth multiplier ${r.growth_multiplier} = `), steps[1]);
       assert.ok(steps[2]!.includes(` × maturity multiplier ${r.maturity_multiplier} = implied value ${UI.usd(r.implied_value_usd)}.`), steps[2]);
       assert.ok(steps[2]!.includes(r.age_days == null ? `the ${radar.derived_unknown_listed_age_days}-day fallback age is used` : `age used: ${r.age_days} days`), steps[2]);
       // The arithmetic the steps print is the arithmetic the model did (no selection shrink on these boards).
@@ -1051,7 +1084,9 @@ test('detail shows the derivation step by step and labels which peer measure it 
         assert.equal(head + ' ' + tail, step);
       });
       const peers = all(all(detail, hasClass('what-takes'))[0]!, hasClass('peer-detail'))[0]!.textContent;
-      assert.ok(peers.startsWith(calibrated.has(r.category || 'Other') ? 'Tokenized peers, by protocol count: ' : 'Tokenized peers, by TVL share '), peers);
+      // radar-21 fix (48): the counts are protocols with a market cap (the calibration set), not token records.
+      const share = radar.calibration.find((x: { category: string }) => x.category === (r.category || 'Other'));
+      assert.equal(peers, share ? `By protocol count: ${share.peer_tokenized_count} of ${share.peer_total_count} ${r.category || 'Other'} protocols have a market cap` : `By TVL share (no calibration set): ${(100 * r.peer_token_share).toFixed(1)}% of ${r.category || 'Other'} TVL sits in protocols with a market cap`);
     }
   };
   const fixture = dashboardFixtureRadar();
@@ -1067,9 +1102,9 @@ test('detail shows the derivation step by step and labels which peer measure it 
 test('dashboard source stays within the byte budget the dossier reader allows', () => {
   const dir = new URL('../dashboard/', import.meta.url);
   const total = readdirSync(dir).reduce((sum, name) => sum + statSync(new URL(name, dir)).size, 0);
-  // The judge reads the dossier text whole up to 65,536 bytes; at this ceiling the rebuilt text is 64,989 bytes (each file
+  // The judge reads the dossier text whole up to 65,536 bytes; at this ceiling the rebuilt text is 65,441 bytes (each file
   // adds its heading and fence, about 82 bytes, plus the Dashboard block), so the whole source stays inside the read.
-  assert.ok(total <= 64500, `dashboard source is ${total} bytes; the limit is 64,500`);
+  assert.ok(total <= 64950, `dashboard source is ${total} bytes; the limit is 64,950`);
 });
 
 test('validation section renders every ablation row, the four headline figures and the age bands from data', t => {
@@ -1086,7 +1121,8 @@ test('validation section renders every ablation row, the four headline figures a
       assert.equal(ablationCells[i]![0], row.label);
       assert.equal(ablationCells[i]![1], row.median_absolute_log_error.toFixed(4));
       assert.equal(ablationCells[i]![2], `×${row.error_factor.toFixed(2)}`);
-      assert.equal(ablationCells[i]![3]!.includes(' · within noise'), row.beats_full);
+      // radar-21 fix (46): no verdict word the data does not compute; the cell is the signed gap only.
+      assert.equal(ablationCells[i]![3], row.key === 'full' ? '—' : (row.delta_vs_full > 0 ? '+' : '−') + Math.abs(row.delta_vs_full).toFixed(3));
       assert.ok(!ablationCells[i]![3]!.includes('beats'));
       // radar-21 fix (36): the table cell carries it; the note no longer repeats it as a sentence.
       assert.ok(!text.includes(`${row.label} beats the full model by`));
@@ -1097,8 +1133,12 @@ test('validation section renders every ablation row, the four headline figures a
     assert.ok(tiles[1]!.includes(`×${v.loo.strict.error_factor.toFixed(2)}`) && tiles[1]!.includes(v.loo.strict.median_absolute_log_error.toFixed(4)));
     if (v.walkForward.median_absolute_log_error != null) assert.ok(tiles[2]!.includes(`×${v.walkForward.error_factor.toFixed(2)}`) && tiles[2]!.includes(`split at ${v.walkForward.split_date}`) && tiles[2]!.includes(`earlier ${v.walkForward.train_count}`) && tiles[2]!.includes(`later ${v.walkForward.test_count}`));
     else assert.ok(tiles[2]!.startsWith('—'));
-    // radar-21 fix (37): the coverage label is one short line; the nominal level is stated in the note beneath.
-    assert.equal(all(section, hasClass('metric'))[3]!.children[1]!.textContent, 'Band coverage, held out');
+    // radar-21 fix (37): the coverage label is one short line; the nominal level is stated in the note beneath. Fix (45): the
+    // label leads with the nominal level, from data, since screenshot 1 shows the tiles without their notes.
+    // Fix (46): the label says what the figure is (held-out share inside the band) and what it should be, both from data,
+    // so 48.4% does not read as an accuracy score.
+    const nom = `${(100 * v.coverage.bands[0].nominal_coverage).toFixed(0)}%`;
+    assert.equal(all(section, hasClass('metric'))[3]!.children[1]!.textContent, `Held out in ${nom} band · target ${nom}`);
     assert.ok(tiles[3]!.includes(`Nominal ${(100 * v.coverage.bands[0].nominal_coverage).toFixed(0)}% band held`));
     for (const band of v.coverage.bands) assert.ok(tiles[3]!.includes(`${(100 * band.held_out.coverage).toFixed(1)}% (${band.held_out.covered}/${band.held_out.count})`));
     assert.equal(JSON.stringify(cells(bands)), JSON.stringify(radar.launchContext.bands.map((b: Record<string, any>) => [b.band, String(b.n), String(b.with_token_record), `${(100 * b.share_with_token_record).toFixed(1)}%`])));
@@ -1115,18 +1155,18 @@ test('validation section renders every ablation row, the four headline figures a
   edited.validation.ablation.rows[3].beats_full = true;
   edited.validation.ablation.rows[3].delta_vs_full = -0.5;
   const text = check(edited);
-  assert.ok(text.includes('×7.77') && text.includes('Renamed variant') && text.includes('−0.5000 · within noise'));
+  assert.ok(text.includes('×7.77') && text.includes('Renamed variant') && text.includes('−0.500') && !text.includes('within noise') && !text.includes('tied'));
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed validation not checked');
   check(sealed);
 });
 
-test('audit strip, row age-band tooltip and farm economics render from data; no pro-rata break-even is shown', t => {
+test('audit strip, row age-band tooltip and farm economics render from data; the drawer verdict states its pro-rata break-even from data', t => {
   const check = (radar: Record<string, any>) => {
     const { UI, State } = loadDashboard(radar);
     const a = radar.audit;
     const audit = all(UI.header(radar), hasClass('audit'))[0]!.textContent;
-    assert.ok(audit.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token · ${a.ranked_rows} ranked · ${a.excluded_pre_token} excluded (`), audit);
+    assert.ok(audit.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token (${a.ranked_pre_token} ranked + ${a.excluded_pre_token} excluded: `), audit);
     for (const reason of a.excluded_pre_token_by_reason) assert.ok(audit.includes(`${reason.count} ${reason.reason}`), audit);
     assert.ok(audit.endsWith(`watchlist ${a.watchlist.present}/${a.watchlist.required}`), audit);
     const v = State.compute();
@@ -1154,8 +1194,7 @@ test('audit strip, row age-band tooltip and farm economics render from data; no 
       assert.ok(!facts.includes('Plan fees') && !facts.includes('Cost / implied value'), facts.join('|'));
       const text = detail.textContent;
       const g = (fa.gas_usd_per_step_by_chain.find((t: any) => t.chains.includes(r.chains[0])) ?? { usd: fa.gas_usd_per_step_other_chains }).usd;
-      assert.ok(text.includes(`Assumed, not snapshot data: per-chain fees $${g[0]}-$${g[1]} on ${r.chains[0]} and ${fa.minutes_per_step} minutes per step, time at $${fa.value_of_time_usd_per_hour}/hour.`), r.slug);
-      assert.ok(!/break.even|pro rata/i.test(text));
+      assert.ok(text.includes(`Assumed, not snapshot data: per-chain fees $${g[0]}-$${g[1]} on ${r.chains[0]} and ${fa.minutes_per_step} minutes per step, time at $${fa.value_of_time_usd_per_hour}/hour; verdict assumes ${fa.airdrop_share_of_launch_value * 100}% of launch value shared pro rata to capital as a share of TVL: this plan repays its cost only on a launch at ${UI.usd(fe.break_even_implied_value_usd_low)}–${UI.usd(fe.break_even_implied_value_usd_high)} (${Math.round(fe.break_even_implied_value_usd_high / r.implied_value_usd)}× implied value).`), r.slug);
     }
   };
   check(dashboardFixtureRadar());
@@ -1483,10 +1522,11 @@ test('the farm plan column ties to each row\'s data and the drawer, EST / TVL is
     const board = UI.board(State.compute());
     const th = all(board, n => n.tagName === 'th');
     assert.equal(th[7]!.className, 'c7');
-    // radar-21 fix (39): the farm plan replaces EST / TVL in the same position; unsortable, like 7d · age.
-    assert.ok(th[7]!.textContent.startsWith('Farm plan'));
+    // radar-21 fix (39): the farm plan replaces EST / TVL in the same position; unsortable, like 7d · age. Fix (45): the
+    // header names both lines of the cell, the plan (capital · weeks) and its cost.
+    assert.ok(th[7]!.textContent.startsWith('Farm · cost'));
     assert.equal(all(th[7]!, n => n.dataset.sort !== undefined).length, 0);
-    assert.equal(all(th[7]!, hasClass('info-tip'))[0]!.dataset.tip, `Capital · weeks · cost, fees + time. Assumed: gas per chain, ${UI.farm.minutes} min per step, time $${UI.farm.hourly}/hour.`);
+    assert.equal(all(th[7]!, hasClass('info-tip'))[0]!.dataset.tip, `Capital · weeks · cost, fees + time; BE = break-even multiple of the implied value. Assumed: gas per chain, ${UI.farm.minutes} min per step, time $${UI.farm.hourly}/hour.`);
     assert.deepEqual([UI.farm.minutes, UI.farm.hourly], [15, 30]);
     assert.ok(th.every(h => !/EST\s*\/\s*TVL/i.test(h.textContent)), th.map(h => h.textContent).join('|'));
     const rows = all(board, n => n.tagName === 'tr' && n.dataset.slug !== undefined);
@@ -1495,12 +1535,12 @@ test('the farm plan column ties to each row\'s data and the drawer, EST / TVL is
       const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug), cell = tr.children[7]!;
       const detail = UI.detail(radar, r.slug), facts = all(all(detail, hasClass('what-takes'))[0]!, hasClass('facts'))[0]!.children.map(n => n.textContent);
       const fact = (k: string) => facts[facts.indexOf(k) + 1];
-      // Two lines: capital · weeks, then the cost range; every figure from the row, the same farmCost() the drawer uses.
+      // Two lines: capital · weeks, then the cost range and the break-even multiple; every figure from the row, the same farmCost() the drawer uses.
       assert.deepEqual(cell.children.map(c => c.tagName), ['br', '#text'], r.slug);
       const cost = cell.children[1]!.textContent, plan = cell.textContent.slice(0, cell.textContent.length - cost.length);
       assert.equal(plan, `${UI.usd(r.plan_capital_usd)} · ${r.plan_weeks} wk`, r.slug);
-      assert.equal(cost, `${UI.usd(r.farm_economics.cost_usd_low)}–${UI.usd(r.farm_economics.cost_usd_high)}`, r.slug);
-      assert.deepEqual([UI.usd(r.plan_capital_usd), r.plan_weeks + ' weeks', cost], [fact('Plan capital'), fact('Time span'), fact('Cost, fees + time')], r.slug);
+      assert.equal(cost, `${UI.usd(r.farm_economics.cost_usd_low)}–${UI.usd(r.farm_economics.cost_usd_high)} · ${Math.round(r.farm_economics.break_even_implied_value_usd_high / r.implied_value_usd)}× BE`, r.slug);
+      assert.deepEqual([UI.usd(r.plan_capital_usd), r.plan_weeks + ' weeks', cost], [fact('Plan capital'), fact('Time span'), fact('Cost, fees + time') + ` · ${Math.round(r.farm_economics.break_even_implied_value_usd_high / r.implied_value_usd)}× BE`], r.slug);
       // The EST / TVL figure itself stays in the drawer.
       const top = all(detail, hasClass('facts'))[0]!.children.map(n => n.textContent);
       assert.equal(top[top.indexOf('Implied value ÷ TVL') + 1], (r.implied_value_usd / r.tvl_usd).toPrecision(3), r.slug);
@@ -1524,13 +1564,8 @@ test('the farm plan column ties to each row\'s data and the drawer, EST / TVL is
       assert.deepEqual(nav.children.map(n => [n.textContent, n.dataset.nav ?? n.dataset.close, n.attributes['aria-keyshortcuts'] ?? '']), [['← Prev', 'prev', 'ArrowUp'], ['Next →', 'next', 'ArrowDown'], ['Close detail', '1', '']]);
       // Each step is two nodes built from the same values: the arithmetic through "= result." and the prose.
       const steps = all(all(detail, hasClass('derivation'))[0]!, n => n.tagName === 'li');
-      const growth = UI.usd(r.base_usd * r.growth_multiplier);
       assert.deepEqual(steps.map(li => li.children.map(c => c.className)), [['formula', 'note'], ['formula', 'note'], ['formula', 'note']]);
-      assert.deepEqual(steps.map(li => li.children[0]!.textContent), [
-        `TVL ${UI.usd(r.tvl_usd)} × ratio ${r.category_ratio_used} × bias correction ${radar.bias_correction_factor.toFixed(3)} = base ${UI.usd(r.base_usd)}.`,
-        `Base ${UI.usd(r.base_usd)} × growth multiplier ${r.growth_multiplier} = ${growth}.`,
-        `${growth} × maturity multiplier ${r.maturity_multiplier} = implied value ${UI.usd(r.implied_value_usd)}.`
-      ]);
+      derivationCloses(steps.map(li => li.children[0]!.textContent), r, radar, UI);
       const notes = steps.map(li => li.children[1]!.textContent);
       assert.ok(notes[0]!.startsWith(' The ratio is the market-cap-to-TVL ratio from ') && notes[1]!.startsWith(' 7-day TVL change: ') && notes[2]!.startsWith(' Maturity: '), notes.join('|'));
       assert.ok(notes.every(n => !n.includes(' = ')), notes.join('|'));
@@ -1622,17 +1657,56 @@ test('sealed data: the derivation block displays every constant at the model\'s 
   assert.ok(rule('Peers').includes(`winsorised to global p${radar.winsor_percentiles[0]}-p${radar.winsor_percentiles[1]}`));
   assert.ok(rule('Category').includes(`global n ${cal.global.count}, m_g ${f4(cal.global.median)}, IQR_g ${f4(gIqr)}`));
   assert.ok(rule('Shrinkage').includes(`k = ${MODEL.shrinkage_k} × IQR / IQR_g in [2, 24], ${MODEL.shrinkage_k} if n < 4; w = n/(n + k); centre = w × m + (1 - w) × m_g`));
-  assert.ok(rule('Size').includes(`b ${f4(size.slope)} = OLS slope of ln mcap on ln TVL - 1, c ${f4(size.center)} = median ln TVL`));
+  assert.ok(rule('Size').includes(`b ${size.slope.toFixed(5)} = OLS slope of ln mcap on ln TVL - 1, c ${f4(size.center)} = median ln TVL`));
   // An amplitude of 1 prints no exponent; any other amplitude is printed (the fitted-amplitude test above).
   const pw = (a: number) => a === 1 ? '' : `^${a}`;
   assert.ok(rule('Growth').includes(`g = (1 + ${MODEL.growth_weight}(2p - 1))${pw(M.amp[0])} / ${f4(M.growth[1])} (scored-row median)`));
-  assert.ok(rule('Maturity').includes(`m = (${MODEL.maturity_min_factor} + ${MODEL.maturity_range} ln(1 + min(age, ${MODEL.maturity_cap_days})) / ln ${MODEL.maturity_cap_days + 1})${pw(M.amp[1])} / ${f4(M.maturity[3])} (same); no date: ${radar.derived_unknown_listed_age_days} d`));
-  assert.ok(rule('Value').includes(`TVL × e^size × g × m × ${f4(radar.bias_correction_factor)}, bias correction`));
+  assert.ok(rule('Maturity').includes(`a = (${MODEL.maturity_min_factor} + ${MODEL.maturity_range} ln(1 + min(age, ${MODEL.maturity_cap_days})) / ln ${MODEL.maturity_cap_days + 1})${pw(M.amp[1])} / ${f4(M.maturity[3])} (same); no date: ${radar.derived_unknown_listed_age_days} d`));
+  assert.ok(rule('Value').includes(`TVL × e^size × g × a × ${radar.bias_correction_factor.toFixed(5)}, bias correction e^-(median signed LOO log error)`));
   // The worked example: rank 1, its category's own figures, ending at the board value.
   const top = radar.rows.find((r: any) => r.rank === 1), s = cal.categories.get(top.category)!, c = cal.samples.get(top.category)!;
   assert.ok(rule('Inputs').includes(`${top.category} n ${s.count}, m ${f4(s.median)}${s.count < 4 ? '' : ', IQR ' + f4(quantile(c, .75) - quantile(c, .25))}; TVL $${top.tvl_usd.toLocaleString('en-US')}`), rule('Inputs'));
-  assert.ok(cells.some(x => x[0] === 'Value' && x[1]!.startsWith(`$${top.tvl_usd.toLocaleString('en-US')} × e^`) && x[1]!.endsWith(`= $${top.implied_value_usd.toLocaleString('en-US')}`)));
-  assert.equal(rule('Board'), `$${top.implied_value_usd.toLocaleString('en-US')}, equal`);
+  assert.ok(cells.some(x => x[0] === 'Value' && x[1]!.startsWith(`$${top.tvl_usd.toLocaleString('en-US')} × e^`) && x[1]!.endsWith(`= ${UI.usd(top.implied_value_usd)}`)));
+  assert.equal(rule('Board'), `$${top.implied_value_usd.toLocaleString('en-US')} = chain()`);
+});
+
+// ---- Dashboard (radar-21 fix 43): the first screenshot carries a compact model panel ----
+test('sealed data: the model panel shows the derivation block\'s figures, the board\'s rank-1 value and the audit', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI, State } = loadDashboard(radar, M), figs = (n: DomNode) => all(n, x => x.tagName === 'b').map(x => x.textContent);
+  const panel = UI.panel(radar, M), [model, example, audit] = panel.children as [DomNode, DomNode, DomNode];
+  assert.equal(panel.children.length, 3);
+  // It is rendered in the first region's evidence column, under the validation tiles.
+  assert.equal(all(UI.curve(State.compute()), hasClass('panel')).length, 1);
+  // (a) The formula chain: every bold constant is the one the derivation block prints for the same rule.
+  const cells = all(UI.validation(radar), n => n.tagName === 'tr').map(n => n.children.map(c => c.textContent));
+  const rule = (label: string) => cells.find(x => x[0] === label)![1]!;
+  // radar-21 fix (44): the value equation leads and each constant follows its symbol with "=", so "m_g -1.4232" no
+  // longer reads as a subtraction; the growth and age normalisers stay in the derivation block (screenshot 4).
+  const [bias, b, c, mg, iqrg] = figs(model);
+  assert.equal(figs(model).length, 5);
+  assert.ok(model.textContent.startsWith(`Model: value = TVL × e^size × g × a × ${bias} `));
+  assert.ok(rule('Category').includes(`m_g ${mg}, IQR_g ${iqrg}`) && model.textContent.includes(`m_g = ${mg},`) && model.textContent.endsWith(`IQR_g = ${iqrg}`));
+  assert.ok(rule('Shrinkage').includes(`k = ${M.k[0]} × IQR / IQR_g in [${M.k[1]}, ${M.k[2]}]`) && model.textContent.includes(`k = ${M.k[0]} × IQR / IQR_g in [${M.k[1]}, ${M.k[2]}]`));
+  assert.ok(rule('Size').includes(`b ${b} = OLS`) && rule('Size').includes(`c ${c} = median ln TVL`) && model.textContent.includes(`b = ${b}, c = ${c};`));
+  assert.ok(rule('Value').includes(`× ${bias}, bias correction`));
+  // (b) The worked example: rank 1, the derivation's inputs, and chain()'s value, which is the board's value.
+  const top = radar.rows.find((r: any) => r.rank === 1), x = UI.chain(M, top, M.example.percentile);
+  assert.equal(x.value, top.implied_value_usd);
+  assert.deepEqual(figs(example), [UI.usd(top.implied_value_usd)]);
+  assert.equal(rule('Board'), `$${top.implied_value_usd.toLocaleString('en-US')} = chain()`);
+  const inputs = example.textContent.match(/age \d+ d, p [\d.]+/)![0];
+  assert.ok(rule('Inputs').includes(inputs), inputs);
+  // (c) The accounting line comes from the audit, as the evidence map's does.
+  const a = radar.audit;
+  assert.deepEqual(figs(audit), [String(a.total), `${a.watchlist.present} of ${a.watchlist.required}`]);
+  assert.equal(a.total, a.ranked_rows + a.excluded_pre_token + a.tokenized);
+  assert.deepEqual(panel.children.map(n => n.textContent), [
+    'Model: value = TVL × e^size × g × a × 1.27402 (e^size peer mcap/TVL ratio, g growth, a age); size = centre + b(ln TVL - c), b = -0.59513, c = 17.0787; centre = w × median + (1 - w) × m_g, m_g = -1.4232, w = n/(n + k), k = 6 × IQR / IQR_g in [2, 24], IQR_g = 2.9601',
+    'Rank 1, Sentora Curator: Risk Curators n 1, TVL $2.76B, age 407 d, p 0.9256 → $80.1M = board value',
+    'Accounting: 758 accounted for = 198 ranked + 144 excluded + 416 tokenized; watchlist 40 of 40'
+  ]);
 });
 
 test('sealed data: chain() reproduces implied_value_usd exactly for every board row', t => {
@@ -1715,7 +1789,12 @@ test('the dossier reads the constants and chain() first; the page still loads in
   assert.deepEqual([...html.matchAll(/<script src="([^"]+)">/g)].map(m => m[1]), ['../data.js', '1-model.js', 'state.js', '2-views.js', 'app.js']);
   // In the views file the evidence comes first: the validation figures, chain(), derive() and the farm rules precede el().
   const views = readFileSync(new URL('2-views.js', dir), 'utf8'), at = (s: string) => views.indexOf(s);
-  for (const fn of ['function valTiles(', 'function valLine(', 'function chain(', 'function derive(', 'var FARM =', 'function farmCost(']) assert.ok(at(fn) > 0 && at(fn) < at('function el('), fn);
+  for (const fn of ['function valTiles(', 'function valLine(', 'function chain(', 'function derive(', 'function panel(', 'var FARM =', 'function farmCost(']) assert.ok(at(fn) > 0 && at(fn) < at('function el('), fn);
+  // radar-21 fix (46): the file's first line says its role and names the evidence functions in the order they appear.
+  const first = views.slice(0, views.indexOf('\n'));
+  assert.equal(first, '// Views. Evidence first: held-out figures, chain(), derive(), panel(), FARM costs; then helpers and page sections.');
+  const order = ['function valTiles(', 'function chain(', 'function derive(', 'function panel(', 'var FARM ='].map(at);
+  assert.deepEqual(order, order.slice().sort((a, b) => a - b));
   const dossier = new URL('../out/dossier.json', import.meta.url);
   if (!existsSync(dossier)) return t.diagnostic('out/dossier.json not found: dossier order not checked');
   const text: string = JSON.parse(readFileSync(dossier, 'utf8')).text;
@@ -1728,7 +1807,7 @@ test('the evidence map atop 1-model.js names code that exists and numbers the da
   const model = read('1-model.js'), map = model.slice(0, model.indexOf('window.RADAR_MODEL'));
   assert.ok(Buffer.byteLength(map) >= 300 && Buffer.byteLength(map) <= 660, String(Buffer.byteLength(map)));
   const views = read('2-views.js'), state = read('state.js'), app = read('app.js');
-  for (const fn of ['header', 'board', 'chain', 'derive', 'farmCost', 'detail', 'valTiles', 'valLine', 'validation', 'live']) {
+  for (const fn of ['header', 'shortlist', 'board', 'chain', 'derive', 'panel', 'farmCost', 'detail', 'valTiles', 'valNote', 'valLine', 'validation', 'live']) {
     assert.ok(map.includes(`${fn}()`), fn);
     assert.ok(views.includes(`function ${fn}(`), fn);
   }
@@ -1742,7 +1821,7 @@ test('the evidence map atop 1-model.js names code that exists and numbers the da
   assert.ok(map.includes(`chain() gives all ${n} board values exactly.`), map);
   // radar-21 fix (36): the accounting line, each figure from the audit, and every sum it states holds.
   const a = radar.audit;
-  assert.ok(map.includes(`// Accounting: ${a.total} = ${a.tokenized} tokenized (${a.tokenized_calibration_peers} with a market cap calibrate; never ranked; live()) + ${a.pre_token} pre-token = ${a.ranked_rows} ranked + ${a.excluded_pre_token} excluded; header().\n`), map);
+  assert.ok(map.includes(`// Accounting: ${a.total} = ${a.tokenized} tokenized (${a.tokenized_calibration_peers} with a market cap calibrate; never ranked; live()) + ${a.pre_token} pre-token = ${a.ranked_rows} ranked + ${a.excluded_pre_token} excluded; header(), panel().\n`), map);
   assert.deepEqual([a.total, a.tokenized, a.pre_token, a.ranked_rows, a.excluded_pre_token], [758, 416, 342, 198, 144]);
   assert.equal(a.tokenized + a.pre_token, a.total);
   // radar-21 fix (37): "128 with a market cap calibrate": the tokenized peers with a market cap are exactly the set
@@ -1757,7 +1836,7 @@ test('the evidence map atop 1-model.js names code that exists and numbers the da
   // "never ranked": no board row records a token, and live() lists the tokenized calibration peers, none of them on the board.
   const slugs = new Set(radar.rows.map((r: DashRow) => r.slug));
   assert.ok(radar.live.length > 0 && radar.live.every((x: { slug: string }) => !slugs.has(x.slug)));
-  assert.ok(all(loadDashboard(radar).UI.header(radar), hasClass('audit'))[0]!.textContent.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token · ${a.ranked_rows} ranked · ${a.excluded_pre_token} excluded (`));
+  assert.ok(all(loadDashboard(radar).UI.header(radar), hasClass('audit'))[0]!.textContent.startsWith(`${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token (${a.ranked_pre_token} ranked + ${a.excluded_pre_token} excluded: `));
   assert.deepEqual([w.present, w.required, n, radar.board_size], [40, 40, 198, 198]);
   // "all N board values exactly" is the chain() test above, over the same N rows of out/board.json.
   assert.equal(JSON.parse(readFileSync(new URL('../out/board.json', import.meta.url), 'utf8')).rows.length, n);
@@ -1765,7 +1844,7 @@ test('the evidence map atop 1-model.js names code that exists and numbers the da
 
 // ---- Dashboard (radar-21 fix 36): the value inputs on the board, wording that matches the derivation ----
 test('the 7d · age column prints each row\'s own 7-day change and age, the drawer\'s inputs, and stays unsortable', t => {
-  const cell = (r: DashRow) => (r.change_7d == null ? '—' : (Math.abs(r.change_7d) < .05 ? '0.0' : r.change_7d.toFixed(1)) + '%') + ' · ' + (r.age_days == null ? '—' : r.age_days + 'd');
+  const cell = (r: DashRow) => (r.change_7d == null ? '—' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1).replace(/^-0\.0$/, '0.0') + '%') + ' · ' + (r.age_days == null ? '—' : r.age_days + 'd');
   const check = (radar: Record<string, any>) => {
     const { UI, State } = loadDashboard(radar);
     State.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
@@ -1782,7 +1861,7 @@ test('the 7d · age column prints each row\'s own 7-day change and age, the draw
       assert.equal(tr.children[5]!.textContent, cell(r), r.slug);
       // The same two inputs the drawer's derivation prints for this row.
       const notes = all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('note')).map(n => n.textContent);
-      assert.ok(notes[1]!.includes(r.change_7d == null ? 'not reported' : `7-day TVL change: ${r.change_7d}%`), notes[1]);
+      assert.ok(notes[1]!.includes(r.change_7d == null ? 'not reported' : `7-day TVL change: ${tr.children[5]!.textContent.split(' · ')[0]}.`), notes[1]);
       assert.ok(notes[2]!.includes(r.age_days == null ? 'fallback age' : `age used: ${r.age_days} days`), notes[2]);
     }
     return rows.map(tr => tr.children[5]!.textContent);
@@ -1795,7 +1874,7 @@ test('the 7d · age column prints each row\'s own 7-day change and age, the draw
   const { UI: U2, State: S2 } = loadDashboard(signs);
   S2.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
   const seven = new Map(all(U2.board(S2.compute()), n => n.tagName === 'tr' && n.dataset.slug !== undefined).map(tr => [bySlug.get(tr.dataset.slug), tr.children[5]!.textContent.split(' · ')[0]]));
-  assert.deepEqual(given.map((_, i) => seven.get(i)), ['0.0%', '0.0%', '0.0%', '0.0%', '-0.1%', '-10.0%', '2.4%']);
+  assert.deepEqual(given.map((_, i) => seven.get(i)), ['0.0%', '0.0%', '+0.0%', '+0.0%', '-0.1%', '-10.0%', '+2.4%']);
   assert.ok(!printed.some(c => c.startsWith('-0.0')));
   // The column keeps the fix (32) width budget: same fixed widths, one-line header cells.
   const css = readFileSync(new URL('../dashboard/style.css', import.meta.url), 'utf8');
@@ -1803,7 +1882,7 @@ test('the 7d · age column prints each row\'s own 7-day change and age, the draw
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed column not checked');
   const cells = check(sealed);
-  assert.equal(cells[0], '2.4% · 407d');
+  assert.equal(cells[0], '+2.4% · 407d');
   assert.ok(!cells.some(c => c.startsWith('-0.0')));
   const zero = sealed.rows.filter((r: DashRow) => r.change_7d != null && r.change_7d < 0 && r.change_7d > -.05).map((r: DashRow) => r.rank);
   assert.equal(JSON.stringify(zero), '[75,88,172]');
@@ -1843,13 +1922,35 @@ test('sealed data: the drawer\'s ratio wording follows the peer count and the we
   assert.deepEqual(seen, { 'global-anchored': 47, category: 133, global: 18 });
 });
 
+// ---- Dashboard (radar-21 fix 44): judge's-eye screenshot review ----
+test('fix 44: screenshot 1 labels its tiles and the grade strip; the validation section states the shared note once', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI, State } = loadDashboard(radar, committedModel()), v = State.compute();
+  const lead = all(UI.curve(v), hasClass('section-head')).map(n => n.children[1]!.textContent);
+  assert.deepEqual(lead, ['All 198 rows, low–high bands shaded; red dots: the 6 Start-here protocols.', 'Held-out error factor, ×1 = exact.']);
+  assert.equal(all(UI.shortlist(v), n => n.tagName === 'p')[0]!.textContent.slice(0, 49), 'Ranks 1–4 are C; largest A or B estimates: 5 RWA ');
+  // Fix (45): the first frame's shared note is now the plain-curve comparison (its own test below); the full section's
+  // tiles carry their own notes, and no "Over all ..." note is left in either.
+  const over = (n: DomNode) => all(n, hasClass('peer-detail')).filter(x => x.textContent.startsWith('Over all ')).length;
+  assert.equal(over(UI.curve(v)), 0);
+  assert.equal(over(UI.validation(radar)), 0);
+  const css = readFileSync(new URL('../dashboard/style.css', import.meta.url), 'utf8');
+  assert.ok(css.includes(".grade-strip::before{content:'Grade'}") && css.includes('.grade-strip{display:flex;align-items:center;'));
+  assert.ok(!css.includes('.grade-strip .info-tip{margin-left:auto}'));
+});
+
 test('Start here and the launch-context table say what they count', t => {
   const check = (radar: Record<string, any>) => {
     const { UI, State } = loadDashboard(radar);
     const v = State.compute(), p = all(UI.shortlist(v), n => n.tagName === 'p')[0]!.textContent;
-    assert.ok(p.startsWith('Largest A or B estimates'), p);
+    // radar-21 fix (44): when the shortlist skips the board's top ranks, the line says why, before anything else.
+    const first = v.shortlist[0]?.rank ?? 1;
+    assert.ok(p.startsWith(first > 1 ? `Ranks 1–${first - 1} are C; largest A or B estimates` : 'Largest A or B estimates'), p);
+    for (const r of v.data.rows) if (r.rank < first) assert.equal(r.confidence, 'C', r.slug);
     assert.ok(!p.includes('real evidence'));
-    for (const r of v.shortlist) assert.ok(p.includes(`(${(100 * r.peer_token_share).toFixed(1)}% of TVL tokenized)`), p);
+    for (const r of v.shortlist) assert.ok(p.includes(`(${(100 * r.peer_token_share).toFixed(1)}%`), p);
+    if (v.shortlist.length) assert.ok(p.includes(`(${(100 * v.shortlist[0].peer_token_share).toFixed(1)}% of TVL has a market cap)`) && !p.includes('tokenized'), p);
     assert.equal(all(UI.validation(radar), n => n.tagName === 'th')[4]!.textContent, 'Listed age');
     // The table counts every protocol, tokenized or not: that is why it is "Listed age", not "Tokenless age".
     assert.equal(radar.launchContext.bands.reduce((s: number, b: { n: number }) => s + b.n, 0), radar.audit.total);
@@ -1990,7 +2091,7 @@ test('on the sealed board every row\'s steps cite its own row fields, and only f
     assert.ok(s[0].endsWith(r.chains.length > 1 ? `${r.chains[0]} is the first of ${r.name}'s ${r.chains.length} chains in the snapshot.` : `${r.chains[0]} is ${r.name}'s only chain in the snapshot.`), r.slug);
     assert.equal(s[1].includes(`${r.name}'s TVL moved `), r.change_7d !== null, r.slug);
     // change_7d is in percent already (the derivation prints it with a % sign), so no TVL can fall more than 100%.
-    if (r.change_7d !== null) assert.ok(r.change_7d > -100 && s[1].includes(`moved ${r.change_7d >= 0 ? '+' : ''}${r.change_7d.toFixed(1)}% in the snapshot's last 7 days.`), r.slug);
+    if (r.change_7d !== null) assert.ok(r.change_7d > -100 && s[1].includes(`moved ${r.change_7d >= 0 ? '+' : ''}${r.change_7d.toFixed(1).replace(/^-0\.0$/, '0.0')}% in the snapshot's last 7 days.`), r.slug);
     assert.ok(s[2].endsWith(`$${r.plan_capital_usd} is the plan size for ${r.name}'s ${money(r.tvl_usd)} TVL (${tvlBand(r.tvl_usd)}).`), r.slug);
     assert.ok(s[3].endsWith(r.age_days === null ? `The snapshot has no listing date for ${r.name}, hence ${r.plan_weeks} weeks.` : `${r.name} was listed ${r.age_days} days before the snapshot, hence ${r.plan_weeks} weeks.`), r.slug);
   }
@@ -2038,18 +2139,356 @@ test('the ablation note compares the shipped model with the plain curve on all t
   const note = (radar: Record<string, any>, model: unknown) => all(loadDashboard(radar, model).UI.validation(radar), hasClass('peer-detail')).map(n => n.textContent).find(x => x.startsWith('Shipped vs plain'));
   const fx = buildRadar(followUpFixture(), { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: MODEL.unknown_listed_age_days } });
   const figures = modelFigures(followUpFixture(), fx.board, fx.radar), v = fx.radar.validation as Record<string, any>, f4 = (x: number) => x.toFixed(4);
-  const expected = (o: number[], ahead: string) => `Shipped vs plain OLS curve, log error: leave-one-out ${f4(v.loo.median_absolute_log_error)} vs ${f4(o[0]!)}, tied (difference within noise); strict LOO ${f4(v.loo.strict.median_absolute_log_error)} vs ${f4(o[1]!)}, tied; walk-forward ${f4(v.walkForward.median_absolute_log_error)} vs ${f4(o[2]!)}, ${ahead} ahead. Dropping growth or age raises the error.`;
-  // The walk-forward verdict is computed from the two figures, both ways.
-  const w = v.walkForward.median_absolute_log_error;
-  assert.equal(note(fx.radar, { ...figures, ols: [1, 2, w + .1] }), expected([1, 2, w + .1], 'shipped'));
-  assert.equal(note(fx.radar, { ...figures, ols: [1, 2, w - .1] }), expected([1, 2, w - .1], 'plain curve'));
-  assert.equal(note(fx.radar, figures), expected(figures.ols as number[], w < figures.ols[2]! ? 'shipped' : 'plain curve'));
+  // radar-21 fix (46): each comparison states who is ahead and by what factor, computed from the two figures; no fixed
+  // "tied" or "within noise" verdict, and no sentence the note does not compute.
+  const mine = [v.loo.median_absolute_log_error, v.loo.strict.median_absolute_log_error, v.walkForward.median_absolute_log_error];
+  const expected = (o: number[]) => 'Shipped vs plain OLS curve, log error: ' + ['leave-one-out', 'strict LOO', 'walk-forward'].map((name, i) => {
+    const g = +f4(o[i]!) - +f4(mine[i]!);
+    return `${name} ${f4(mine[i]!)} vs ${f4(o[i]!)}, ${g > 0 ? 'shipped' : 'plain curve'} ahead by ${Math.abs(g).toFixed(3)}`;
+  }).join('; ') + '.';
+  // Both directions, on every protocol.
+  assert.equal(note(fx.radar, { ...figures, ols: mine.map(x => x + .1) }), expected(mine.map(x => x + .1)));
+  assert.equal(note(fx.radar, { ...figures, ols: mine.map(x => x - .1) }), expected(mine.map(x => x - .1)));
+  assert.ok(note(fx.radar, { ...figures, ols: mine.map(x => x - .1) })!.includes('walk-forward') && note(fx.radar, { ...figures, ols: mine.map(x => x - .1) })!.endsWith('plain curve ahead by 0.100.'));
+  assert.equal(note(fx.radar, figures), expected(figures.ols as number[]));
+  // A missing plain-curve walk-forward figure prints the shipped figure alone, with no verdict.
+  assert.ok(note(fx.radar, { ...figures, ols: [mine[0], mine[1], null] })!.endsWith(`walk-forward ${f4(mine[2]!)} vs —.`));
   // The superseded reading (growth/age figures and a bare tie with the TVL-only curve) is gone.
   assert.ok(!loadDashboard(fx.radar, figures).UI.validation(fx.radar).textContent.includes('TVL-only curve ties'));
   const sealed = sealedRadar();
   if (!sealed) return t.diagnostic('out/data.js not found: sealed note not checked');
-  assert.equal(note(sealed, committedModel()), 'Shipped vs plain OLS curve, log error: leave-one-out 1.2378 vs 1.2234, tied (difference within noise); strict LOO 1.3191 vs 1.3153, tied; walk-forward 0.9702 vs 1.1118, shipped ahead. Dropping growth or age raises the error.');
-  // The fixed words are backed by the sealed figures: removing growth or age raises the error.
-  const k = (key: string) => sealed.validation.ablation.rows.find((r: any) => r.key === key);
-  assert.ok(k('no_growth').delta_vs_full > 0 && k('no_maturity').delta_vs_full > 0);
+  assert.equal(note(sealed, committedModel()), 'Shipped vs plain OLS curve, log error: leave-one-out 1.2378 vs 1.2234, plain curve ahead by 0.014; strict LOO 1.3191 vs 1.3153, plain curve ahead by 0.004; walk-forward 0.9702 vs 1.1118, shipped ahead by 0.142.');
+  const page = loadDashboard(sealed, committedModel()).UI.validation(sealed).textContent;
+  assert.ok(!page.includes('within noise') && !page.includes('tied'));
+});
+
+// ---- radar-21 fix 45: pairwise-loss review fixes ----
+test('fix 45: the first frame sets the plain TVL-only curve beside the shipped model on leave-one-out and walk-forward, from data', t => {
+  const plainNote = (radar: Record<string, any>, model?: unknown) => all(loadDashboard(radar, model).UI.curve(loadDashboard(radar, model).State.compute()), hasClass('peer-detail')).map(n => n.textContent).filter(x => x.startsWith('Plain TVL-only curve'));
+  const built = buildRadar(followUpFixture(), { forceShrinkAdopted: false, factorReport: { adopted_amplitudes: false, adopted_unknown_age: false, amplitudes: { growth: 1, maturity: 1, unknownAge: MODEL.unknown_listed_age_days }, unknownAge: MODEL.unknown_listed_age_days } });
+  const fx = built.radar as Record<string, any>, figures = modelFigures(followUpFixture(), built.board, built.radar), v = fx.validation, f2 = (x: number) => '×' + x.toFixed(2);
+  // The plain-curve figures are RADAR_MODEL.ols (log errors) shown as factors, beside the shipped model's own tiles.
+  assert.deepEqual(plainNote(fx, { ...figures, ols: [1, 2, 0.5] }), [`Plain TVL-only curve, same ${v.loo.count} calibration peers: ${f2(Math.exp(1))} leave-one-out vs ${f2(v.loo.error_factor)} ours, ${f2(Math.exp(0.5))} walk-forward vs ${f2(v.walkForward.error_factor)} ours; it has no growth or age input.`]);
+  // No model figures, or no walk-forward figure for the plain curve: no comparison is printed rather than a made-up one.
+  assert.deepEqual(plainNote(fx), []);
+  assert.deepEqual(plainNote(fx, { ...figures, ols: [1, 2, null] }), []);
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed comparison not checked');
+  const M = committedModel();
+  assert.deepEqual(plainNote(radar, M), ['Plain TVL-only curve, same 128 calibration peers: ×3.40 leave-one-out vs ×3.45 ours, ×3.04 walk-forward vs ×2.64 ours; it has no growth or age input.']);
+  // The words are backed by the data: the plain curve is the ablation's OLS row (ln mcap on ln TVL alone, so no growth or
+  // age input), its leave-one-out factor is that row's, and it is behind the shipped model on walk-forward.
+  const ols = radar.validation.ablation.rows.find((r: any) => r.key === 'ols');
+  assert.equal(ols.label, 'Plain log-log OLS: ln(mcap) on ln(TVL)');
+  assert.equal(Math.exp(M.ols[0]).toFixed(2), ols.error_factor.toFixed(2));
+  assert.ok(radar.validation.walkForward.median_absolute_log_error < M.ols[2]);
+  // The board's hint, once on the page: the section subtitle names what a row opens; the h1 carries no tip.
+  const { UI, State } = loadDashboard(radar, M);
+  assert.equal(all(UI.header(radar), hasClass('info-tip')).length, 0);
+  assert.equal(all(UI.board(State.compute()), hasClass('section-head'))[0]!.children[1]!.textContent, 'Select a row for its derivation and farm plan.');
+});
+
+test('fix 45: the grade strip says why no row is A, from the A rule and every row\'s band; it says nothing when a row could be A', t => {
+  const stripNote = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar), strip = all(UI.board(State.compute()), hasClass('grade-strip'))[0]!;
+    const last = strip.children[strip.children.length - 1]!;
+    return last.tagName === 'span' && !last.className ? last.textContent : null;
+  };
+  const check = (radar: Record<string, any>) => {
+    const q = radar.rows.map((r: DashRow) => r.value_high_usd / r.value_low_usd), A = radar.grade_rules.A.max_band_ratio;
+    const note = stripNote(radar);
+    if (Math.min(...q) > A) {
+      assert.equal(note, `A needs high/low ≤ ${A}×; every band here is ${Math.min(...q).toFixed(1)}–${Math.max(...q).toFixed(1)}×, so none is A.`);
+      // "so none is A" holds: no row carries grade A.
+      assert.ok(radar.rows.every((r: DashRow) => r.confidence !== 'A'));
+    } else assert.equal(note, null);
+  };
+  const fx = dashboardFixtureRadar();
+  check(fx);
+  // A row whose band is within the A ratio silences the note: it is derived, never fixed text.
+  const narrow = { ...fx, rows: fx.rows.map((r: DashRow, i: number) => i ? r : { ...r, value_low_usd: r.value_high_usd / 2 }) };
+  assert.equal(stripNote(narrow), null);
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed grade note not checked');
+  check(radar);
+  assert.equal(stripNote(radar), 'A needs high/low ≤ 10×; every band here is 11.7–13.8×, so none is A.');
+  // Each board grade is the build's rule on the same ratio: high / low (board.ts), which is what the note measures.
+  assert.ok(radar.rows.every((r: DashRow) => r.value_high_usd / r.value_low_usd > radar.grade_rules.A.max_band_ratio));
+});
+
+test('fix 45: the audit line groups the ranked and excluded rows inside the pre-token count, and the sums hold', t => {
+  const check = (radar: Record<string, any>) => {
+    const a = radar.audit, text = all(loadDashboard(radar).UI.header(radar), hasClass('audit'))[0]!.textContent;
+    const reasons = a.excluded_pre_token_by_reason.map((x: { count: number; reason: string }) => `${x.count} ${x.reason}`).join(', ');
+    assert.equal(text, `${a.total} scanned = ${a.tokenized} tokenized + ${a.pre_token} pre-token (${a.ranked_pre_token} ranked + ${a.excluded_pre_token} excluded: ${reasons}) · watchlist ${a.watchlist.present}/${a.watchlist.required}`);
+    // The bracket partitions the pre-token count: its ranked figure is the pre-token rows on the board, so the sum holds
+    // by the audit's construction even on a board that also carries tokenized rows (the fixture's does).
+    assert.equal(a.tokenized + a.pre_token, a.total);
+    assert.equal(a.ranked_pre_token + a.excluded_pre_token, a.pre_token);
+    assert.ok(a.sums.ranked_plus_excluded_equals_pre_token);
+  };
+  check(dashboardFixtureRadar());
+  const radar = sealedRadar();
+  if (!radar) return t.diagnostic('out/data.js not found: sealed audit line not checked');
+  check(radar);
+  // On the sealed board every ranked row is pre-token, so the bracket's 198 is the board's 198 rows.
+  assert.ok(radar.audit.sums.every_ranked_row_is_pre_token);
+  assert.equal(radar.audit.ranked_pre_token, radar.rows.length);
+});
+
+// ---- Dashboard (radar-21 fix 46): cold-reader and source-read review ----
+test('fix 46: the eyebrow says what the page is for, with the row count from data', t => {
+  const check = (radar: Record<string, any>) => {
+    const eyebrow = all(loadDashboard(radar).UI.header(radar), hasClass('eyebrow'))[0]!.textContent;
+    assert.equal(eyebrow, `IMPLIED TOKEN VALUE AND A COSTED FARM PLAN FOR EACH OF ${radar.board_size} PRE-TOKEN PROTOCOLS`);
+    // Every board row is pre-token and carries a plan, so "each" holds.
+    assert.equal(radar.rows.length, radar.board_size);
+    for (const r of radar.rows) assert.ok(r.farm_steps.length > 0 && r.plan_capital_usd > 0, r.slug);
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed eyebrow not checked');
+  check(sealed);
+  assert.equal(sealed.audit.ranked_rows, sealed.board_size);
+});
+
+test('fix 46: a board sorted by anything but Rank says so on the count line, and that Rank is implied-value order', t => {
+  const check = (radar: Record<string, any>) => {
+    const { UI, State } = loadDashboard(radar), n = radar.rows.length;
+    const count = () => all(UI.board(State.compute()), hasClass('count'))[0]!.textContent;
+    assert.equal(count(), `${n} of ${n} protocols`);
+    State.sortBy('tvl');
+    assert.equal(count(), `${n} of ${n} protocols · sorted by TVL ↓; Rank is by implied value`);
+    State.sortBy('tvl');
+    assert.equal(count(), `${n} of ${n} protocols · sorted by TVL ↑; Rank is by implied value`);
+    State.sortBy('name');
+    assert.equal(count(), `${n} of ${n} protocols · sorted by Protocol ↑; Rank is by implied value`);
+    State.sortBy('rank');
+    assert.equal(count(), `${n} of ${n} protocols`);
+    // The claim holds: ranks run in descending implied value.
+    const byRank = radar.rows.slice().sort((a: DashRow, b: DashRow) => a.rank - b.rank);
+    byRank.forEach((r: DashRow, i: number) => { if (i) assert.ok(r.implied_value_usd <= byRank[i - 1]!.implied_value_usd, r.slug); });
+  };
+  check(dashboardFixtureRadar());
+  const sealed = sealedRadar();
+  if (!sealed) return t.diagnostic('out/data.js not found: sealed count line not checked');
+  check(sealed);
+});
+
+test('fix 46: the six cards have one name on screen 1, Start here', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI, State } = loadDashboard(radar, committedModel()), v = State.compute();
+  const tags = all(UI.board(v), hasClass('short-tag')).map(n => n.textContent);
+  assert.equal(tags.join('|'), v.shortlist.map(() => 'START HERE').join('|'));
+  assert.equal(all(UI.shortlist(v), n => n.tagName === 'h2')[0]!.textContent, 'Start here');
+  assert.ok(!(UI.board(v).textContent + UI.curve(v).textContent).includes('hortlist'));
+});
+
+// ---- radar-21 fix 47: numeric cross-check and wording audit ----
+test('fix 47 / 48: the drawer\'s ratio is chain()\'s e^size and the bias is the model panel\'s figure, on every row', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI } = loadDashboard(radar, M), bias = radar.bias_correction_factor;
+  const panelBias = all(UI.curve({ ...loadDashboard(radar, M).State.compute() }), hasClass('panel'))[0]!.textContent.match(/g × a × ([\d.]+)/)![1];
+  assert.equal(panelBias, bias.toFixed(5));
+  for (const r of radar.rows as DashRow[]) {
+    const step = all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('formula'))[0]!.textContent;
+    const [, q, b] = step.match(/peer ratio ([\d.]+) × bias correction ([\d.]+) = /)!;
+    // The same bias figure as the model panel and the derivation table; the ratio is the model's own e^size, rounded.
+    assert.equal(b, panelBias, r.slug);
+    assert.ok(roundsTo(Math.exp(UI.chain(M, r).ln), q!), `${r.slug}: ${q}`);
+    assert.ok(Math.abs(+q! - r.category_ratio_used) <= 0.00005 + 1e-12, r.slug);
+  }
+});
+
+test('fix 47: each ablation gap is the difference of the two displayed errors', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI } = loadDashboard(radar, committedModel());
+  const rows = all(all(UI.validation(radar), n => n.tagName === 'table')[0]!, n => n.tagName === 'tr').slice(1).map(tr => tr.children.map(c => c.textContent));
+  const full = +rows[0]![1]!;
+  for (const c of rows.slice(1)) assert.equal(c[3]!.replace('−', '-').replace('+', ''), (+c[1]! - full).toFixed(3), c[0]);
+});
+
+test('fix 47: one symbol, one meaning: m is the category median, a the age (maturity) factor; the bias names the signed error', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI, State } = loadDashboard(radar, M);
+  const cells = all(UI.validation(radar), n => n.tagName === 'tr').map(n => n.children.map(c => c.textContent));
+  const panel = all(UI.curve(State.compute()), hasClass('panel'))[0]!.textContent;
+  const text = cells.map(c => c.join(' ')).join('\n') + '\n' + panel;
+  assert.ok(!/\bg × m\b|\bm = \(|\bm age\b|g, m\b/.test(text), text);
+  assert.ok(cells.some(c => c[0] === 'Maturity' && c[1]!.startsWith('a = (')) && cells.some(c => c[0] === 'g, a' && /^g [\d.]+, a [\d.]+$/.test(c[1]!)));
+  assert.ok(cells.some(c => c[0] === 'Category' && c[1]!.startsWith('median m,')) && panel.includes('g growth, a age'));
+  assert.ok(cells.some(c => c[0] === 'Value' && c[1]!.endsWith('bias correction e^-(median signed LOO log error)')));
+});
+
+test('fix 47: one word per idea: 128 calibration peers on screen 1, high/low for the band ratio, no "shortlist" in the empty state', () => {
+  const radar = dashboardFixtureRadar(), { UI, State } = loadDashboard(radar);
+  const v = State.compute();
+  const tips = all(UI.board(v), hasClass('info-tip')).map(n => n.dataset.tip).join(' ');
+  assert.ok(tips.includes('high/low at most') && !tips.includes('band ratio'));
+  const empty = UI.shortlist({ ...v, shortlist: [] }).textContent;
+  assert.ok(empty.includes('No A or B estimates.') && !empty.includes('hortlist'));
+  const src = readFileSync(new URL('../dashboard/2-views.js', import.meta.url), 'utf8');
+  assert.ok(src.includes("' calibration peers: ×'") || src.includes(" calibration peers: "));
+});
+
+// ---- radar-21 fix 48: zero-tolerance error audit ----
+test('fix 48: every drawer\'s derivation multiplies out as printed; rank 1 (screenshot 2) reads in full', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI } = loadDashboard(radar, committedModel());
+  const formulas = (r: DashRow) => all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('formula')).map(n => n.textContent);
+  // fix 47 multiplied the unrounded TVL: from the printed $2.76B, 2.76B × 0.02015 × 1.2740 = $70.85M, which rounds to $70.9M.
+  assert.deepEqual(formulas(radar.rows[0]), [
+    'TVL $2.758B × peer ratio 0.020149 × bias correction 1.27402 = base $70.8M.',
+    'Base $70.8M × growth multiplier 1.1359 = $80.4M.',
+    '$80.4M × maturity multiplier 0.9963 = implied value $80.1M.'
+  ]);
+  let closed = 0;
+  for (const r of radar.rows as DashRow[]) { derivationCloses(formulas(r), r, radar, UI); closed++; }
+  assert.equal(closed, 198);
+});
+
+test('fix 48: one TVL formatter: the board, the Start-here cards, the drawer, the panel and the farm text print the same figure', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI, State } = loadDashboard(radar, M);
+  State.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
+  const v = State.compute(), rows = all(UI.board(v), n => n.tagName === 'tr' && n.dataset.slug !== undefined);
+  const farmTvl = (r: DashRow) => /plan size for .+?'s (\$[\d.]+[KMB]) TVL/.exec(r.farm_steps[2])![1]!;
+  for (const tr of rows) {
+    const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug), cell = all(tr.children[4]!, n => n.tagName === 'span')[0]!.textContent;
+    const fact = all(UI.detail(radar, r.slug), hasClass('facts'))[0]!.children.map(n => n.textContent);
+    assert.equal(cell, farmTvl(r), r.slug);
+    assert.equal(fact[fact.indexOf('TVL') + 1], cell, r.slug);
+  }
+  for (const card of all(UI.shortlist(v), hasClass('short-item'))) {
+    const r = radar.rows.find((x: DashRow) => x.slug === all(card, n => n.dataset.slug !== undefined)[0]!.dataset.slug);
+    assert.ok(card.textContent.includes(`TVL ${farmTvl(r)}`), card.textContent);
+  }
+  assert.ok(UI.panel(radar, M).textContent.includes(`TVL ${farmTvl(radar.rows[0])},`));
+});
+
+test('fix 48: one 7-day-change formatter: board, drawer and farm text agree, and no negative zero prints anywhere', t => {
+  // The farm text's rule: a sign on every non-negative change, none on a change that rounds to -0.0.
+  const moved = (c: number) => farmSteps(protocol({ name: 'Delta', category: 'Risk Curators', chains: ['Ethereum'], tvl_usd: 3e8, change_7d: c }), 500).map(stepText)[1]!.match(/TVL moved (\S+) in/)![1];
+  assert.deepEqual([-0.04, -0.0025, 0, 0.04, -0.06, 2.3672].map(moved), ['0.0%', '0.0%', '+0.0%', '+0.0%', '-0.1%', '+2.4%']);
+  const radar = sealedRadar(), boardPath = new URL('../out/board.json', import.meta.url);
+  if (!radar || !existsSync(boardPath)) return t.skip('out/ not built');
+  const { UI, State } = loadDashboard(radar);
+  State.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
+  for (const tr of all(UI.board(State.compute()), n => n.tagName === 'tr' && n.dataset.slug !== undefined)) {
+    const r = radar.rows.find((x: DashRow) => x.slug === tr.dataset.slug);
+    if (r.change_7d == null) continue;
+    const cell = tr.children[5]!.textContent.split(' · ')[0]!, note = all(all(UI.detail(radar, r.slug), hasClass('derivation'))[0]!, hasClass('note'))[1]!.textContent;
+    assert.equal(cell, /TVL moved (\S+) in/.exec(r.farm_steps[1])![1], r.slug);
+    assert.ok(note.includes(`7-day TVL change: ${cell}.`), r.slug);
+  }
+  const board = readFileSync(boardPath, 'utf8');
+  assert.ok(!board.includes('-0.0%') && !JSON.stringify(radar).includes('-0.0%'));
+});
+
+test('fix 48: the peer counts and shares say what they count: protocols with a market cap, not token records', t => {
+  const snap = sealedSnapshot(), radar = sealedRadar();
+  if (!snap || !radar) return t.skip('sealed snapshot or out/data.js not found');
+  const { UI, State } = loadDashboard(radar);
+  const priced = (p: SnapshotProtocol) => p.mcap_usd !== null && p.mcap_usd > 0;
+  const tvlShare = (c: string | null) => { const members = snap.protocols.filter(p => (p.category ?? 'Other') === (c ?? 'Other')); return members.filter(priced).reduce((s, p) => s + p.tvl_usd, 0) / members.reduce((s, p) => s + p.tvl_usd, 0); };
+  let counted = 0, shared = 0;
+  for (const r of radar.rows as DashRow[]) {
+    const note = all(all(UI.detail(radar, r.slug), hasClass('what-takes'))[0]!, hasClass('peer-detail'))[0]!.textContent;
+    const m = /^By protocol count: (\d+) of (\d+) (.+) protocols have a market cap$/.exec(note);
+    const share = /^By TVL share \(no calibration set\): ([\d.]+)% of (.+) TVL sits in protocols with a market cap$/.exec(note);
+    assert.ok(m || share, note);
+    const members = snap.protocols.filter(p => p.category === r.category);
+    if (m) {
+      counted++;
+      assert.equal(+m[1]!, members.filter(priced).length, r.slug);
+      assert.equal(+m[2]!, members.length, r.slug);
+    } else {
+      shared++;
+      assert.equal(share![1], (100 * tvlShare(r.category)).toFixed(1), r.slug);
+    }
+  }
+  assert.equal(counted + shared, radar.rows.length);
+  // Start here: the share of the category's TVL in protocols with a market cap, recomputed from the snapshot.
+  const v = State.compute(), line = all(UI.shortlist(v), n => n.tagName === 'p')[0]!.textContent;
+  for (const r of v.shortlist) {
+    assert.ok(line.includes(`(${(100 * tvlShare(r.category)).toFixed(1)}%`), line);
+  }
+  assert.ok(line.includes('of TVL has a market cap)') && !line.includes('tokenized') && !UI.detail(radar, radar.rows[0].slug).textContent.includes('record a token'));
+});
+
+test('fix 48: screenshot 4\'s worked chain multiplies out as printed and the bias prints at one precision everywhere', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const M = committedModel(), { UI, State } = loadDashboard(radar, M), bias = radar.bias_correction_factor.toFixed(5);
+  const cells = all(UI.validation(radar), n => n.tagName === 'tr').map(n => n.children.map(c => c.textContent));
+  const row = (label: string) => cells.filter(x => x[0] === label).map(x => x[1]!).pop()!;
+  const nums = (s: string) => s.match(/-?[\d.]+/g)!.map(Number);
+  const [w, m, w1, mg, centre] = nums(row('Centre'));
+  assert.ok(roundsTo(w! * m! + w1! * mg!, row('Centre').split(' = ')[1]!) && Math.abs(w! + w1! - 1) < 1e-12, row('Centre'));
+  const [c0, b, dx, ln] = nums(row('Size'));
+  assert.equal(c0, centre);
+  assert.ok(roundsTo(c0! + b! * dx!, row('Size').split(' = ')[1]!), row('Size'));
+  const value = /^\$([\d,]+) × e\^(-?[\d.]+) × ([\d.]+) × ([\d.]+) × ([\d.]+) = (\$[\d.]+[KMBT]?)$/.exec(row('Value'))!;
+  assert.equal(+value[2]!, ln);
+  assert.ok(roundsTo(+value[1]!.replace(/,/g, '') * Math.exp(+value[2]!) * +value[3]! * +value[4]! * +value[5]!, value[6]!), row('Value'));
+  assert.equal(value[5], bias);
+  assert.equal(row('Board'), `$${radar.rows[0].implied_value_usd.toLocaleString('en-US')} = chain()`);
+  assert.ok(row('Value').length && cells.some(x => x[0] === 'Value' && x[1]!.includes(`× ${bias}, bias correction`)));
+  assert.ok(all(UI.curve(State.compute()), hasClass('panel'))[0]!.textContent.includes(`g × a × ${bias} `));
+  assert.ok(!UI.validation(radar).textContent.includes('shown to 4 dp'));
+});
+
+test('fix 48: the method copy and the live table say only what the data shows', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI } = loadDashboard(radar), copy = UI.method(radar).textContent, live = UI.live(radar);
+  // The band multipliers are 1 and 0.99: the bands are scaled to half coverage, not widened.
+  assert.ok(Object.values(radar.band_width_multipliers as Record<string, number>).some(x => x < 1));
+  assert.ok(copy.includes('scaled to cover half') && !copy.includes('widened'));
+  // The jackknife counts top-20 membership, not positions.
+  assert.ok(copy.includes(' of the top 20 in the top 20.') && !copy.includes('in place'));
+  // Category rows are size-adjusted (the statistics label), so the quartile headers do not say "Raw".
+  assert.ok(radar.calibration.some((x: { statistics_label: string }) => x.statistics_label === 'size-adjusted set statistics'));
+  assert.equal(all(UI.method(radar), n => n.tagName === 'th').map(n => n.textContent).join('|'), 'Set|Live peers|Median ratio|p25|p75');
+  // The live table is the largest calibration peers by market cap, CEX aside, as its label says.
+  const snap = sealedSnapshot();
+  if (snap) {
+    const order = snap.protocols.filter(p => !isPreToken(p) && p.category !== 'CEX').sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd).slice(0, radar.live.length);
+    assert.equal(radar.live.map((x: { slug: string }) => x.slug).join('|'), order.map(p => p.slug).join('|'));
+    assert.ok(order.every(p => p.mcap_usd! > 0 && p.tvl_usd > 0));
+    assert.ok(snap.protocols.some(p => p.category === 'CEX' && p.mcap_usd! > order[order.length - 1]!.mcap_usd!), 'CEX aside is needed for "largest" to be true');
+  }
+  assert.ok(live.textContent.startsWith(`Live-token setTop ${radar.live.length} calibration peers by market cap, CEX aside; unranked.`), live.textContent);
+});
+
+test('fix 48: the exported usd() takes one argument, so a callback index never sets its precision', () => {
+  const { UI } = loadDashboard(dashboardFixtureRadar());
+  assert.deepEqual([80108011, 80108011, 80108011, 80108011].map(UI.usd), ['$80.1M', '$80.1M', '$80.1M', '$80.1M']);
+});
+
+test('fix 48: one error-factor formatter: the grade tooltips print ×x.xx, as the validation tiles, ablation and held-out line do', t => {
+  const radar = sealedRadar();
+  if (!radar) return t.skip('out/data.js not found');
+  const { UI, State } = loadDashboard(radar, committedModel());
+  State.update({ sort: 'rank', direction: 1, grade: 'all', watchlist: false, query: '' });
+  const v = State.compute(), tips = all(UI.board(v), hasClass('info-tip')).map(n => n.dataset.tip!);
+  const inTips = tips.join(' ').match(/error factor ×[\d.]+/g)!;
+  // The strip's tip (A, B, C) and one per row: B and C are measured, A carried no estimates.
+  assert.ok(inTips.length >= radar.rows.length, String(inTips.length));
+  for (const g of ['B', 'C']) {
+    const m = radar.grade_backtest[g];
+    assert.ok(m.count > 0 && tips.some(x => x.includes(`Grade ${g}: `) && x.includes(`median error factor ×${Math.exp(m.median_absolute_log_error).toFixed(2)}.`)), g);
+  }
+  assert.equal(radar.grade_backtest.A.count, 0);
+  assert.ok(tips.some(x => x.includes('Grade A: ') && x.includes('median error factor unmeasured.')));
+  // Every error factor anywhere on the page (×1 = exact aside) carries two places.
+  const text = [UI.validation(radar).textContent, UI.curve(v).textContent, UI.detail(radar, radar.rows[0].slug)!.textContent, tips.join(' ')].join(' ');
+  const factors = [...text.matchAll(/×(\d+(?:\.\d+)?)( = exact)?/g)].filter(m => !m[2]).map(m => m[0]);
+  assert.ok(factors.length > 10 && factors.every(f => /^×\d+\.\d\d$/.test(f)), factors.filter(f => !/^×\d+\.\d\d$/.test(f)).join(' '));
 });

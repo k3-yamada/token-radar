@@ -1,16 +1,13 @@
 (function () {
   'use strict';
-
   var root = document.getElementById('app'), State = window.RadarState, UI = window.RadarComponents;
   if (!root || !State.getData()) {
     if (root) root.textContent = 'Radar data unavailable.';
     return;
   }
-
   var html = document.documentElement, page, shortlistRegion, boardRegion, detailRegion, toTop;
   var opener, openerRegion, trail = [];
   function slugOf(r) { return r.slug; }
-
   function mount() {
     var v = State.compute(), d = v.data;
     document.title += ' · ' + d.model_version;
@@ -39,7 +36,6 @@
     root.replaceChildren(page, detailRegion);
     onScroll();
   }
-
   function onScroll() {
     var t = boardRegion.querySelector('table'), h = t.tHead, b = t.getBoundingClientRect(), y = Math.max(0, Math.min(-b.top, b.height - h.offsetHeight - 160)), r = toTop.getBoundingClientRect(), w = boardRegion.getBoundingClientRect();
     h.style.transform = y ? 'translateY(' + y + 'px)' : '';
@@ -48,17 +44,14 @@
   }
   addEventListener('scroll', onScroll);
   addEventListener('resize', onScroll);
-
   function renderBoard() {
     page.classList.remove('is-entering');
     UI.updateBoardResults(boardRegion.querySelector('[data-results="board"]'), State.compute());
     onScroll();
   }
-
   function mark(s) {
     boardRegion.querySelectorAll('tr').forEach(function (r) { r.classList.toggle('on', r.dataset.slug === s); });
   }
-
   function renderDetail() {
     var v = State.compute(), detail = v.selected && UI.detail(v.data, v.selected), scrim = document.createElement('div');
     mark(v.selected);
@@ -73,7 +66,6 @@
       step(0);
     }
   }
-
   function step(by) {
     var i = trail.indexOf(State.getState().selected) + by, slug = trail[i], d = detailRegion.lastChild, f, b;
     if (by) {
@@ -93,7 +85,6 @@
     b = d.querySelector(b ? '[data-nav=' + b + ']' : '[data-close]');
     (b.disabled ? d : b).focus();
   }
-
   function openDetail(source) {
     opener = source;
     openerRegion = source.closest('[data-results]');
@@ -102,7 +93,6 @@
     if (trail.indexOf(v.selected) < 0) trail = v.order.map(slugOf);
     renderDetail();
   }
-
   function closeDetail() {
     var slug = State.getState().selected;
     if (!slug) return;
@@ -116,7 +106,6 @@
     }
     opener = openerRegion = null;
   }
-
   root.addEventListener('input', function (e) {
     var f = e.target.dataset.filter;
     if (f) {
@@ -126,7 +115,6 @@
       renderBoard();
     }
   });
-
   root.addEventListener('click', function (e) {
     if (e.target.closest('.info-tip')) return;
     var sort = e.target.closest('[data-sort]'), close = e.target.closest('[data-close]'), g = e.target.closest('[data-grade]');
@@ -156,14 +144,12 @@
       if (row) openDetail(row);
     }
   });
-
   root.addEventListener('keydown', function (e) {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-slug]')) {
       e.preventDefault();
       openDetail(e.target);
     }
   });
-
   function placeTip(e) {
     var t = e.target.closest('.info-tip');
     if (!t) return;
@@ -178,7 +164,6 @@
   window.addEventListener('resize', function () {
     root.querySelectorAll('.info-tip[style]').forEach(function (t) { t.style.removeProperty('--tip-x'); });
   });
-
   document.addEventListener('keydown', function (e) {
     var by = { ArrowUp: -1, ArrowDown: 1 }[e.key];
     if (e.key === 'Escape') closeDetail();
@@ -187,6 +172,5 @@
       step(by);
     }
   });
-
   mount();
 }());
